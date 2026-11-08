@@ -32,16 +32,17 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function send(
   eventId: string,
   type: string,
-  payload: Record<string, unknown> = {},
+  fields: Record<string, unknown> = {},
 ): Promise<void> {
   const response = await fetch(`${BASE_URL}/events`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    // Formato plano del PDF: eventId, ts, type y campos al nivel raíz.
     body: JSON.stringify({
       eventId,
       type,
-      timestamp: new Date().toISOString(),
-      payload,
+      ts: new Date().toISOString(),
+      ...fields,
     }),
   });
   if (!response.ok) {
@@ -56,7 +57,7 @@ async function send(
       : result.status === 'duplicate'
         ? '⏭ (duplicado)'
         : `⚠ ignorado: ${result.reason ?? ''}`;
-  console.log(`${badge} ${eventId} ${type} ${JSON.stringify(payload)}`);
+  console.log(`${badge} ${eventId} ${type} ${JSON.stringify(fields)}`);
 }
 
 /** Consulta qué agente está timbrando una llamada (el motor lo asignó). */
@@ -88,16 +89,16 @@ async function main(): Promise<void> {
   await sleep(DELAY_MS);
 
   // --- 3. Entra una llamada a ventas y otra a soporte ----------------------
-  await send(eid(5), 'call.received', {
+  await send(eid(5), 'call.incoming', {
     callId: cid(1),
     queue: 'ventas',
-    numeroOrigen: '+5110000001',
+    callerId: '+5110000001',
   });
   await sleep(DELAY_MS);
-  await send(eid(6), 'call.received', {
+  await send(eid(6), 'call.incoming', {
     callId: cid(2),
     queue: 'soporte',
-    numeroOrigen: '+5110000002',
+    callerId: '+5110000002',
   });
   await sleep(DELAY_MS);
 
@@ -107,10 +108,10 @@ async function main(): Promise<void> {
   await sleep(DELAY_MS);
 
   // --- 5. Otra llamada a ventas: queda EN_COLA (no hay agentes libres) -----
-  await send(eid(8), 'call.received', {
+  await send(eid(8), 'call.incoming', {
     callId: cid(3),
     queue: 'ventas',
-    numeroOrigen: '+5110000003',
+    callerId: '+5110000003',
   });
   await sleep(DELAY_MS);
 
@@ -146,20 +147,20 @@ async function main(): Promise<void> {
   await sleep(DELAY_MS);
 
   // --- 11. Llamada a facturación -------------------------------------------
-  await send(eid(16), 'call.received', {
+  await send(eid(16), 'call.incoming', {
     callId: cid(4),
     queue: 'facturacion',
-    numeroOrigen: '+5110000004',
+    callerId: '+5110000004',
   });
   await sleep(DELAY_MS);
   await send(eid(17), 'call.hangup', { callId: cid(4) });
   await sleep(DELAY_MS);
 
   // --- 12. Última llamada: se cierra limpia para no dejar agentes colgados -
-  await send(eid(18), 'call.received', {
+  await send(eid(18), 'call.incoming', {
     callId: cid(5),
     queue: 'ventas',
-    numeroOrigen: '+5110000005',
+    callerId: '+5110000005',
   });
   await sleep(DELAY_MS);
   const agent5 = await agentOfCall(cid(5));

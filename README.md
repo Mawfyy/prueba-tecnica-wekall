@@ -117,6 +117,8 @@ PBX/CRM ──POST /events──▶ EventsService ──▶ CallsService / Agent
 | --- | --- | --- |
 | `POST` | `/events` | Ingesta de eventos del PBX (ver catálogo abajo) |
 | `GET` | `/agents` | Lista de agentes con estado y `horaEntradaEstado` |
+| `POST` | `/agents/login` | `{ agentId }` — `OFFLINE -> DISPONIBLE` (equivale al evento `agent.login`) |
+| `POST` | `/agents/logout` | `{ agentId }` — `-> OFFLINE` (equivale al evento `agent.logout`) |
 | `POST` | `/agents/pause` | `{ agentId, reason? }` — pausa manual del supervisor |
 | `POST` | `/agents/unpause` | `{ agentId }` — despausa manual del supervisor |
 | `GET` | `/calls` | Lista de llamadas |
@@ -125,26 +127,66 @@ PBX/CRM ──POST /events──▶ EventsService ──▶ CallsService / Agent
 
 ### Catálogo de eventos (`POST /events`)
 
+Formato del PDF: campos planos en el nivel raíz, uno por petición o en lote
+(array de eventos; se procesa en orden para no invertir la secuencia).
+
 ```jsonc
 {
-  "eventId": "e-001",            // idempotencia: repetido => descartado
-  "type": "call.received",
-  "timestamp": "2026-01-01T10:00:00.000Z",
-  "payload": { "callId": "call-001", "queue": "ventas" }
+  "eventId": "e-001",     // idempotencia: repetido => descartado
+  "ts": "2026-01-01T10:00:00.000Z",
+  "type": "call.incoming",
+  "callId": "call-001",
+  "queue": "ventas",
+  "callerId": "+573001112233"
 }
 ```
 
-| `type` | Payload | Efecto |
+| `type` | Campos | Efecto |
 | --- | --- | --- |
-| `call.received` | `callId, queue, numeroOrigen?` | Crea la llamada `EN_COLA` y dispara asignación |
+| `call.incoming` | `callId, queue, callerId?` | Crea la llamada `EN_COLA` y dispara asignación |
 | `call.answered` | `callId, agentId?` | Llamada `CONECTADA`, agente `EN_LLAMADA` |
 | `call.noanswer` | `callId, agentId?` | Agente `TIMBRANDO -> PAUSA` ("No contesta"); la llamada vuelve **al inicio** de la cola |
-| `call.hangup` | `callId` | Llamada `FINALIZADA` y agente `WRAP_UP` (15s); si estaba en cola/timbrando se marca `ABANDONADA` |
-| `agent.login` / `agent.logout` | `agentId` | `OFFLINE <-> DISPONIBLE` |
+| `call.hangup` | `callId` | Llamada `FINALIZADA` y agente `WRAP_UP` (15s); si estaba en cola/timbrando se marca `ABANDONADA` y el agente vuelve a `DISPONIBLE` |
+| `agent.login` / `agent.logout` | `agentId` | `OFFLINE <-> DISPONIBLE` (también disponibles como `POST /agents/login` y `/agents/logout`) |
 | `agent.pause` / `agent.unpause` | `agentId, reason?` | `DISPONIBLE <-> PAUSA` |
 
 Respuesta: `{ eventId, status: "processed" | "duplicate" | "ignored", reason? }`
 siempre con HTTP 200, para que un evento inconsistente no sea un error HTTP.
+
+### Ejemplos con curl
+
+```bash
+# Listar agentes y colas
+curl http://localhost:3000/agents
+curl http://localhost:3000/queues
+
+# Ciclo de vida de un agente por API REST
+curl -X POST http://localhost:3000/agents/login   -H 'Content-Type: application/json' -d '{"agentId":"AG-1001"}'
+curl -X POST http://localhost:3000/agents/pause   -H 'Content-Type: application/json' -d '{"agentId":"AG-1001","reason":"Almuerzo"}'
+curl -X POST http://localhost:3000/agents/unpause -H 'Content-Type: application/json' -d '{"agentId":"AG-1001"}'
+curl -X POST http://localhost:3000/agents/logout  -H 'Content-Type: application/json' -d '{"agentId":"AG-1001"}'
+
+# Transición inválida (ej. pausar a alguien EN_LLAMADA) responde HTTP 409:
+# {"message":"Transición inválida: EN_LLAMADA -> PAUSA","error":"Conflict","statusCode":409}
+
+# Ingesta de eventos del PBX (formato del PDF: campos planos, idempotente)
+curl -X POST http://localhost:3000/events -H 'Content-Type: application/json' -d '{
+  "eventId": "e-001",
+  "ts": "2026-01-01T10:00:00.000Z",
+  "type": "call.incoming",
+  "callId": "call-001",
+  "queue": "ventas",
+  "callerId": "+573001112233"
+}'
+# Reenviar el mismo eventId responde {"status":"duplicate"} y no cambia nada.
+
+# En lote (array): se procesa en orden y responde un array de resultados
+curl -X POST http://localhost:3000/events -H 'Content-Type: application/json' -d '[
+  {"eventId":"e-002","ts":"2026-01-01T10:00:06Z","type":"call.answered","callId":"call-001","agentId":"AG-1001"},
+  {"eventId":"e-002","ts":"2026-01-01T10:00:06Z","type":"call.answered","callId":"call-001","agentId":"AG-1001"}
+]'
+# => [{"status":"processed"},{"status":"duplicate"}]  (el tercero del PDF es este duplicado)
+```
 
 ---
 
@@ -181,7 +223,7 @@ Algoritmo (`src/assignment/assignment.service.ts`):
 3. Repite hasta agotar llamadas o agentes compatibles.
 
 **El problema de concurrencia:** el ciclo *leer → decidir → escribir* no es
-atómico. Con dos `call.received` casi simultáneos (o un `call.received` y un
+atómico. Con dos `call.incoming` casi simultáneos (o un `call.incoming` y un
 `agent.unpause` a la vez), ambos flujos pueden leer el mismo agente
 `DISPONIBLE` y asignarle dos llamadas, o asignar la misma llamada a dos
 agentes. En Node el event loop no salva esto: entre un `await` de base de
@@ -238,7 +280,7 @@ soporte 90s, facturación 120s); si la cola no está registrada, usa el default
 
 1. El `callId` y el `agentId` los provee el PBX en los eventos; el backend no
    los genera.
-2. La asignación es automática al recibir `call.received` (ACD clásico); no
+2. La asignación es automática al recibir `call.incoming` (ACD clásico); no
    hay paso manual de "aceptar" del agente.
 3. `call.noanswer` regresa la llamada al inicio de la cola conservando su
    `marcasTiempo.incoming` original (al ser la más vieja, el FIFO la deja

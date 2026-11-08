@@ -10,7 +10,7 @@ import { EstadoLlamada } from '../domain/estado-llamada.js';
 import { InconsistencyError } from '../domain/errors.js';
 
 export const EVENT_TYPES = [
-  'call.received',
+  'call.incoming',
   'call.answered',
   'call.noanswer',
   'call.hangup',
@@ -22,21 +22,22 @@ export const EVENT_TYPES = [
 
 export type EventType = (typeof EVENT_TYPES)[number];
 
-export interface EventPayload {
-  callId?: string;
-  agentId?: string;
-  queue?: string;
-  /** Número del cliente que llama (solo call.received). */
-  numeroOrigen?: string;
-  reason?: string;
-}
-
+/**
+ * Evento de entrada con el formato del PDF: campos planos en el nivel raíz
+ * (`eventId`, `ts`, `type`, `callId`, `agentId`, `queue`, `callerId`).
+ * El controller también tolera un `payload` anidado por comodidad interna.
+ */
 export interface IncomingEvent {
   eventId: string;
   type: EventType;
-  /** ISO timestamp del PBX; si falta se usa la hora de recepción. */
-  timestamp?: string;
-  payload?: EventPayload;
+  /** ISO 8601 del PBX; si falta se usa la hora de recepción. */
+  ts?: string;
+  callId?: string;
+  agentId?: string;
+  queue?: string;
+  /** Número del cliente que llama (callerId del PDF) -> Llamada.numeroOrigen. */
+  callerId?: string;
+  reason?: string;
 }
 
 export type EventResultStatus = 'processed' | 'duplicate' | 'ignored';
@@ -96,26 +97,25 @@ export class EventsService {
   }
 
   private dispatch(event: IncomingEvent): Promise<void> {
-    const at = event.timestamp ? new Date(event.timestamp) : new Date();
-    const payload: EventPayload = event.payload ?? {};
+    const at = event.ts ? new Date(event.ts) : new Date();
 
     switch (event.type) {
-      case 'call.received':
-        return this.onCallReceived(payload, at);
+      case 'call.incoming':
+        return this.onCallIncoming(event, at);
       case 'call.answered':
-        return this.onCallAnswered(payload, at);
+        return this.onCallAnswered(event, at);
       case 'call.noanswer':
-        return this.onCallNoAnswer(payload);
+        return this.onCallNoAnswer(event);
       case 'call.hangup':
-        return this.onCallHangup(payload, at);
+        return this.onCallHangup(event, at);
       case 'agent.login':
-        return this.onAgentLogin(payload);
+        return this.onAgentLogin(event);
       case 'agent.logout':
-        return this.onAgentLogout(payload);
+        return this.onAgentLogout(event);
       case 'agent.pause':
-        return this.onAgentPause(payload);
+        return this.onAgentPause(event);
       case 'agent.unpause':
-        return this.onAgentUnpause(payload);
+        return this.onAgentUnpause(event);
       default: {
         // TypeScript garantiza que no se llega aquí con los tipos actuales,
         // pero un payload malformado en runtime no debe tumbar el servicio.
@@ -124,39 +124,39 @@ export class EventsService {
     }
   }
 
-  private requireCallId(payload: EventPayload): string {
-    if (!payload.callId) {
-      throw new InconsistencyError('payload.callId es obligatorio');
+  private requireCallId(event: IncomingEvent): string {
+    if (!event.callId) {
+      throw new InconsistencyError('callId es obligatorio');
     }
-    return payload.callId;
+    return event.callId;
   }
 
-  private requireAgentId(payload: EventPayload): string {
-    if (!payload.agentId) {
-      throw new InconsistencyError('payload.agentId es obligatorio');
+  private requireAgentId(event: IncomingEvent): string {
+    if (!event.agentId) {
+      throw new InconsistencyError('agentId es obligatorio');
     }
-    return payload.agentId;
+    return event.agentId;
   }
 
-  private async onCallReceived(
-    payload: EventPayload,
+  private async onCallIncoming(
+    event: IncomingEvent,
     at: Date,
   ): Promise<void> {
-    const callId = this.requireCallId(payload);
-    if (!payload.queue) {
-      throw new InconsistencyError('payload.queue es obligatorio');
+    const callId = this.requireCallId(event);
+    if (!event.queue) {
+      throw new InconsistencyError('queue es obligatorio');
     }
-    await this.callsService.enqueue(callId, payload.queue, payload.numeroOrigen, at);
+    await this.callsService.enqueue(callId, event.queue, event.callerId, at);
     await this.assignment.assignPendingCalls();
   }
 
   private async onCallAnswered(
-    payload: EventPayload,
+    event: IncomingEvent,
     at: Date,
   ): Promise<void> {
-    const callId = this.requireCallId(payload);
+    const callId = this.requireCallId(event);
     const call = await this.callsService.findOneOrFail(callId);
-    const agentId = payload.agentId ?? call.agenteId;
+    const agentId = event.agentId ?? call.agenteId;
     if (!agentId) {
       throw new InconsistencyError(
         `call.answered de ${callId} sin agente asignado`,
@@ -177,10 +177,10 @@ export class EventsService {
     await this.agentsService.changeState(agent, EstadoAgente.EN_LLAMADA);
   }
 
-  private async onCallNoAnswer(payload: EventPayload): Promise<void> {
-    const callId = this.requireCallId(payload);
+  private async onCallNoAnswer(event: IncomingEvent): Promise<void> {
+    const callId = this.requireCallId(event);
     const call = await this.callsService.findOneOrFail(callId);
-    const agentId = payload.agentId ?? call.agenteId;
+    const agentId = event.agentId ?? call.agenteId;
     if (!agentId) {
       throw new InconsistencyError(
         `call.noanswer de ${callId} sin agente asignado`,
@@ -199,10 +199,10 @@ export class EventsService {
   }
 
   private async onCallHangup(
-    payload: EventPayload,
+    event: IncomingEvent,
     at: Date,
   ): Promise<void> {
-    const callId = this.requireCallId(payload);
+    const callId = this.requireCallId(event);
     const call = await this.callsService.findOneOrFail(callId);
 
     switch (call.estado) {
@@ -240,8 +240,8 @@ export class EventsService {
     }
   }
 
-  private async onAgentLogin(payload: EventPayload): Promise<void> {
-    const agentId = this.requireAgentId(payload);
+  private async onAgentLogin(event: IncomingEvent): Promise<void> {
+    const agentId = this.requireAgentId(event);
     const agent = await this.agentsService.findOne(agentId);
     if (agent.estado !== EstadoAgente.OFFLINE) {
       throw new InconsistencyError(
@@ -252,19 +252,19 @@ export class EventsService {
     await this.assignment.assignPendingCalls();
   }
 
-  private async onAgentLogout(payload: EventPayload): Promise<void> {
-    const agentId = this.requireAgentId(payload);
+  private async onAgentLogout(event: IncomingEvent): Promise<void> {
+    const agentId = this.requireAgentId(event);
     const agent = await this.agentsService.findOne(agentId);
     await this.agentsService.changeState(agent, EstadoAgente.OFFLINE);
   }
 
-  private async onAgentPause(payload: EventPayload): Promise<void> {
-    const agentId = this.requireAgentId(payload);
-    await this.agentsService.pause(agentId, payload.reason);
+  private async onAgentPause(event: IncomingEvent): Promise<void> {
+    const agentId = this.requireAgentId(event);
+    await this.agentsService.pause(agentId, event.reason);
   }
 
-  private async onAgentUnpause(payload: EventPayload): Promise<void> {
-    const agentId = this.requireAgentId(payload);
+  private async onAgentUnpause(event: IncomingEvent): Promise<void> {
+    const agentId = this.requireAgentId(event);
     await this.agentsService.unpause(agentId);
     await this.assignment.assignPendingCalls();
   }
