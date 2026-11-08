@@ -1,89 +1,90 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AgentState,
+  EstadoAgente,
   assertTransition,
-  canTransition,
+  puedeTransicionar,
   InvalidTransitionError,
-  TOTAL_VALID_TRANSITIONS,
-  VALID_TRANSITIONS,
-} from './agent-state.js';
+  TOTAL_TRANSICIONES_VALIDAS,
+  TRANSICIONES_VALIDAS,
+} from './estado-agente.js';
 
-const ALL_STATES = Object.values(AgentState);
+const ALL_STATES = Object.values(EstadoAgente);
 
 describe('Máquina de estados del agente (Requerimiento 2)', () => {
   it('define exactamente 10 transiciones válidas', () => {
-    expect(TOTAL_VALID_TRANSITIONS).toBe(10);
+    expect(TOTAL_TRANSICIONES_VALIDAS).toBe(10);
   });
 
   it('acepta las 10 transiciones válidas del enunciado', () => {
-    for (const [from, targets] of Object.entries(VALID_TRANSITIONS)) {
-      for (const to of targets) {
-        expect(canTransition(from as AgentState, to), `${from} -> ${to}`).toBe(
-          true,
-        );
+    for (const [desde, destinos] of Object.entries(TRANSICIONES_VALIDAS)) {
+      for (const hacia of destinos) {
+        expect(
+          puedeTransicionar(desde as EstadoAgente, hacia),
+          `${desde} -> ${hacia}`,
+        ).toBe(true);
         expect(() =>
-          assertTransition(from as AgentState, to),
+          assertTransition(desde as EstadoAgente, hacia),
         ).not.toThrow();
       }
     }
   });
 
   it('rechaza toda transición fuera de la tabla con InvalidTransitionError', () => {
-    for (const from of ALL_STATES) {
-      for (const to of ALL_STATES) {
-        if (canTransition(from, to)) continue;
-        expect(() => assertTransition(from, to)).toThrow(
+    for (const desde of ALL_STATES) {
+      for (const hacia of ALL_STATES) {
+        if (puedeTransicionar(desde, hacia)) continue;
+        expect(() => assertTransition(desde, hacia)).toThrow(
           InvalidTransitionError,
         );
-        expect(() => assertTransition(from, to)).toThrow(
-          `Transición inválida: ${from} -> ${to}`,
+        expect(() => assertTransition(desde, hacia)).toThrow(
+          `Transición inválida: ${desde} -> ${hacia}`,
         );
       }
     }
   });
 
   it('OFFLINE solo puede pasar a DISPONIBLE', () => {
-    expect(VALID_TRANSITIONS[AgentState.OFFLINE]).toEqual([
-      AgentState.DISPONIBLE,
+    expect(TRANSICIONES_VALIDAS[EstadoAgente.OFFLINE]).toEqual([
+      EstadoAgente.DISPONIBLE,
     ]);
   });
 
   it('no se puede pausar desde OFFLINE', () => {
     expect(() =>
-      assertTransition(AgentState.OFFLINE, AgentState.PAUSA),
+      assertTransition(EstadoAgente.OFFLINE, EstadoAgente.PAUSA),
     ).toThrow(InvalidTransitionError);
   });
 
   it('no se puede colgar y quedar DISPONIBLE: EN_LLAMADA solo lleva a WRAP_UP', () => {
     expect(() =>
-      assertTransition(AgentState.EN_LLAMADA, AgentState.DISPONIBLE),
+      assertTransition(EstadoAgente.EN_LLAMADA, EstadoAgente.DISPONIBLE),
     ).toThrow(InvalidTransitionError);
     expect(() =>
-      assertTransition(AgentState.EN_LLAMADA, AgentState.OFFLINE),
+      assertTransition(EstadoAgente.EN_LLAMADA, EstadoAgente.OFFLINE),
     ).toThrow(InvalidTransitionError);
   });
 
   it('no se puede timbrar de nuevo desde WRAP_UP', () => {
     expect(() =>
-      assertTransition(AgentState.WRAP_UP, AgentState.TIMBRANDO),
+      assertTransition(EstadoAgente.WRAP_UP, EstadoAgente.TIMBRANDO),
     ).toThrow(InvalidTransitionError);
   });
 
   it('no se puede saltar de PAUSA a TIMBRANDO sin pasar por DISPONIBLE', () => {
     expect(() =>
-      assertTransition(AgentState.PAUSA, AgentState.TIMBRANDO),
+      assertTransition(EstadoAgente.PAUSA, EstadoAgente.TIMBRANDO),
     ).toThrow(InvalidTransitionError);
   });
 
   it('no se puede pasar de DISPONIBLE a EN_LLAMADA sin timbrar', () => {
     expect(() =>
-      assertTransition(AgentState.DISPONIBLE, AgentState.EN_LLAMADA),
+      assertTransition(EstadoAgente.DISPONIBLE, EstadoAgente.EN_LLAMADA),
     ).toThrow(InvalidTransitionError);
   });
 
   it('no hay auto-transiciones (un estado no lleva a sí mismo)', () => {
-    for (const state of ALL_STATES) {
-      expect(() => assertTransition(state, state)).toThrow(
+    for (const estado of ALL_STATES) {
+      expect(() => assertTransition(estado, estado)).toThrow(
         InvalidTransitionError,
       );
     }

@@ -62,11 +62,11 @@ async function send(
 /** Consulta qué agente está timbrando una llamada (el motor lo asignó). */
 async function agentOfCall(callId: string): Promise<string | null> {
   const response = await fetch(`${BASE_URL}/calls`);
-  const calls = (await response.json()) as Array<{
+  const llamadas = (await response.json()) as Array<{
     id: string;
-    agentId: string | null;
+    agenteId: string | null;
   }>;
-  return calls.find((call) => call.id === callId)?.agentId ?? null;
+  return llamadas.find((llamada) => llamada.id === callId)?.agenteId ?? null;
 }
 
 async function main(): Promise<void> {
@@ -88,9 +88,17 @@ async function main(): Promise<void> {
   await sleep(DELAY_MS);
 
   // --- 3. Entra una llamada a ventas y otra a soporte ----------------------
-  await send(eid(5), 'call.received', { callId: cid(1), queue: 'ventas' });
+  await send(eid(5), 'call.received', {
+    callId: cid(1),
+    queue: 'ventas',
+    numeroOrigen: '+5110000001',
+  });
   await sleep(DELAY_MS);
-  await send(eid(6), 'call.received', { callId: cid(2), queue: 'soporte' });
+  await send(eid(6), 'call.received', {
+    callId: cid(2),
+    queue: 'soporte',
+    numeroOrigen: '+5110000002',
+  });
   await sleep(DELAY_MS);
 
   // --- 4. El cliente de la llamada 1 contesta ------------------------------
@@ -99,7 +107,11 @@ async function main(): Promise<void> {
   await sleep(DELAY_MS);
 
   // --- 5. Otra llamada a ventas: queda EN_COLA (no hay agentes libres) -----
-  await send(eid(8), 'call.received', { callId: cid(3), queue: 'ventas' });
+  await send(eid(8), 'call.received', {
+    callId: cid(3),
+    queue: 'ventas',
+    numeroOrigen: '+5110000003',
+  });
   await sleep(DELAY_MS);
 
   // --- 6. Termina la llamada 1: el agente entra en WRAP_UP (15s) -----------
@@ -137,13 +149,18 @@ async function main(): Promise<void> {
   await send(eid(16), 'call.received', {
     callId: cid(4),
     queue: 'facturacion',
+    numeroOrigen: '+5110000004',
   });
   await sleep(DELAY_MS);
   await send(eid(17), 'call.hangup', { callId: cid(4) });
   await sleep(DELAY_MS);
 
   // --- 12. Última llamada: se cierra limpia para no dejar agentes colgados -
-  await send(eid(18), 'call.received', { callId: cid(5), queue: 'ventas' });
+  await send(eid(18), 'call.received', {
+    callId: cid(5),
+    queue: 'ventas',
+    numeroOrigen: '+5110000005',
+  });
   await sleep(DELAY_MS);
   const agent5 = await agentOfCall(cid(5));
   if (agent5) {

@@ -1,10 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThanOrEqual, Repository } from 'typeorm';
-import { Call } from './call.entity.js';
-import { CallState } from '../domain/call-state.js';
+import { Repository } from 'typeorm';
+import { Cola } from '../queues/cola.entity.js';
+import { Llamada } from './llamada.entity.js';
+import { EstadoLlamada } from '../domain/estado-llamada.js';
 import { InconsistencyError } from '../domain/errors.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
+
+/** Timestamp de entrada a la cola en ms (0 si no existe, no debería). */
+export function incomingMs(llamada: Llamada): number {
+  const incoming = llamada.marcasTiempo?.incoming;
+  return incoming ? Date.parse(incoming) : 0;
+}
 
 /**
  * Mutaciones de estado de las llamadas. Cada método valida el estado actual
@@ -16,136 +23,174 @@ export class CallsService {
   private readonly logger = new Logger(CallsService.name);
 
   constructor(
-    @InjectRepository(Call)
-    private readonly callRepo: Repository<Call>,
+    @InjectRepository(Llamada)
+    private readonly llamadaRepo: Repository<Llamada>,
+    @InjectRepository(Cola)
+    private readonly colaRepo: Repository<Cola>,
     private readonly dashboard: DashboardService,
   ) {}
 
-  findAll(): Promise<Call[]> {
-    return this.callRepo.find({ order: { enqueuedAt: 'DESC' } });
+  /** Más recientes primero (por su entrada a la cola). */
+  async findAll(): Promise<Llamada[]> {
+    const llamadas = await this.llamadaRepo.find();
+    return llamadas.sort((a, b) => incomingMs(b) - incomingMs(a));
   }
 
-  async findOne(id: string): Promise<Call | null> {
-    return this.callRepo.findOneBy({ id });
+  async findOne(id: string): Promise<Llamada | null> {
+    return this.llamadaRepo.findOneBy({ id });
   }
 
-  async findOneOrFail(id: string): Promise<Call> {
-    const call = await this.findOne(id);
-    if (!call) {
+  async findOneOrFail(id: string): Promise<Llamada> {
+    const llamada = await this.findOne(id);
+    if (!llamada) {
       throw new InconsistencyError(`La llamada ${id} no existe`);
     }
-    return call;
+    return llamada;
   }
 
   /** Entrada a la cola (evento call.received). */
-  async enqueue(callId: string, queue: string, at: Date): Promise<Call> {
+  async enqueue(
+    callId: string,
+    cola: string,
+    numeroOrigen: string | undefined,
+    at: Date,
+  ): Promise<Llamada> {
     const existing = await this.findOne(callId);
     if (existing) {
       throw new InconsistencyError(
-        `La llamada ${callId} ya existe (estado ${existing.state})`,
+        `La llamada ${callId} ya existe (estado ${existing.estado})`,
       );
     }
-    const call = await this.callRepo.save({
+    const llamada = await this.llamadaRepo.save({
       id: callId,
-      queue,
-      state: CallState.EN_COLA,
-      enqueuedAt: at,
+      cola,
+      numeroOrigen: numeroOrigen ?? 'desconocido',
+      estado: EstadoLlamada.EN_COLA,
+      marcasTiempo: { incoming: at.toISOString() },
     });
-    this.logger.log(`Llamada ${callId} en cola ${queue}`);
+    this.logger.log(`Llamada ${callId} en cola ${cola}`);
     await this.dashboard.broadcast();
-    return call;
+    return llamada;
   }
 
-  private async persist(call: Call): Promise<Call> {
-    const saved = await this.callRepo.save(call);
+  private async persist(llamada: Llamada): Promise<Llamada> {
+    const saved = await this.llamadaRepo.save(llamada);
     await this.dashboard.broadcast();
     return saved;
   }
 
-  /** TIMBRANDO -> ATENDIDA. Calcula el waitTimeSec (base de ASA/SLA). */
-  async applyAnswered(call: Call, at: Date): Promise<Call> {
-    if (call.state !== CallState.TIMBRANDO) {
+  /** TIMBRANDO -> CONECTADA. Calcula el tiempoEsperaSeg (base de ASA/SLA). */
+  async applyAnswered(llamada: Llamada, at: Date): Promise<Llamada> {
+    if (llamada.estado !== EstadoLlamada.TIMBRANDO) {
       throw new InconsistencyError(
-        `call.answered sobre llamada ${call.id} en estado ${call.state} (se esperaba TIMBRANDO)`,
+        `call.answered sobre llamada ${llamada.id} en estado ${llamada.estado} (se esperaba TIMBRANDO)`,
       );
     }
-    call.state = CallState.ATENDIDA;
-    call.answeredAt = at;
-    call.waitTimeSec = Math.max(
-      0,
-      Math.round((at.getTime() - call.enqueuedAt.getTime()) / 1000),
-    );
-    return this.persist(call);
+    const incoming = llamada.marcasTiempo.incoming
+      ? Date.parse(llamada.marcasTiempo.incoming)
+      : null;
+    llamada.estado = EstadoLlamada.CONECTADA;
+    llamada.marcasTiempo = { ...llamada.marcasTiempo, connected: at.toISOString() };
+    llamada.tiempoEsperaSeg =
+      incoming != null
+        ? Math.max(0, Math.round((at.getTime() - incoming) / 1000))
+        : null;
+    return this.persist(llamada);
   }
 
   /**
    * TIMBRANDO -> EN_COLA (evento call.noanswer).
-   * Conserva el `enqueuedAt` original: al ser la más vieja, el orden FIFO
-   * la deja al inicio de la cola, como pide el enunciado.
+   * Conserva el `marcasTiempo.incoming` original: al ser la más vieja, el
+   * orden FIFO la deja al inicio de la cola, como pide el enunciado.
    */
-  async applyBackToQueue(call: Call): Promise<Call> {
-    if (call.state !== CallState.TIMBRANDO) {
+  async applyBackToQueue(llamada: Llamada): Promise<Llamada> {
+    if (llamada.estado !== EstadoLlamada.TIMBRANDO) {
       throw new InconsistencyError(
-        `call.noanswer sobre llamada ${call.id} en estado ${call.state} (se esperaba TIMBRANDO)`,
+        `call.noanswer sobre llamada ${llamada.id} en estado ${llamada.estado} (se esperaba TIMBRANDO)`,
       );
     }
-    call.state = CallState.EN_COLA;
-    call.agentId = null;
-    call.assignedAt = null;
-    return this.persist(call);
+    llamada.estado = EstadoLlamada.EN_COLA;
+    llamada.agenteId = null;
+    // El ringing anterior ya no aplica: vuelve a sonar en otro agente.
+    const { ringing: _ringing, ...marcas } = llamada.marcasTiempo;
+    llamada.marcasTiempo = marcas;
+    return this.persist(llamada);
   }
 
-  /** ATENDIDA -> FINALIZADA. Calcula el talkTimeSec. */
-  async applyFinished(call: Call, at: Date): Promise<Call> {
-    if (call.state !== CallState.ATENDIDA) {
+  /** CONECTADA -> FINALIZADA. Calcula el tiempoConversacionSeg. */
+  async applyFinished(llamada: Llamada, at: Date): Promise<Llamada> {
+    if (llamada.estado !== EstadoLlamada.CONECTADA) {
       throw new InconsistencyError(
-        `call.hangup sobre llamada ${call.id} en estado ${call.state} (se esperaba ATENDIDA)`,
+        `call.hangup sobre llamada ${llamada.id} en estado ${llamada.estado} (se esperaba CONECTADA)`,
       );
     }
-    call.state = CallState.FINALIZADA;
-    call.endedAt = at;
-    call.talkTimeSec = call.answeredAt
-      ? Math.max(0, Math.round((at.getTime() - call.answeredAt.getTime()) / 1000))
+    const connected = llamada.marcasTiempo.connected
+      ? Date.parse(llamada.marcasTiempo.connected)
       : null;
-    return this.persist(call);
+    llamada.estado = EstadoLlamada.FINALIZADA;
+    llamada.marcasTiempo = { ...llamada.marcasTiempo, ended: at.toISOString() };
+    llamada.tiempoConversacionSeg =
+      connected != null
+        ? Math.max(0, Math.round((at.getTime() - connected) / 1000))
+        : null;
+    return this.persist(llamada);
   }
 
-  /** EN_COLA o TIMBRANDO -> ABANDONADA (colgó el cliente / maxWaitTimeSec). */
-  async applyAbandoned(call: Call, at: Date): Promise<Call> {
+  /** EN_COLA o TIMBRANDO -> ABANDONADA (colgó el cliente / tiempoMaximoEspera). */
+  async applyAbandoned(llamada: Llamada, at: Date): Promise<Llamada> {
     if (
-      call.state !== CallState.EN_COLA &&
-      call.state !== CallState.TIMBRANDO
+      llamada.estado !== EstadoLlamada.EN_COLA &&
+      llamada.estado !== EstadoLlamada.TIMBRANDO
     ) {
       throw new InconsistencyError(
-        `Abandono sobre llamada ${call.id} en estado ${call.state}`,
+        `Abandono sobre llamada ${llamada.id} en estado ${llamada.estado}`,
       );
     }
-    call.state = CallState.ABANDONADA;
-    call.endedAt = at;
-    call.agentId = null;
-    return this.persist(call);
+    llamada.estado = EstadoLlamada.ABANDONADA;
+    llamada.marcasTiempo = {
+      ...llamada.marcasTiempo,
+      abandoned: at.toISOString(),
+    };
+    llamada.agenteId = null;
+    return this.persist(llamada);
   }
 
-  /** Worker de tiempo máximo de espera: EN_COLA vencidas -> ABANDONADA. */
-  async expireWaiting(maxWaitTimeSec: number): Promise<number> {
-    const cutoff = new Date(Date.now() - maxWaitTimeSec * 1000);
-    const expired = await this.callRepo.find({
-      where: { state: CallState.EN_COLA, enqueuedAt: LessThanOrEqual(cutoff) },
+  /**
+   * Worker de tiempo máximo de espera: EN_COLA vencidas -> ABANDONADA.
+   * El límite es el `tiempoMaximoEspera` de la entidad Cola de la llamada;
+   * si la cola no está registrada se usa el default de configuración.
+   */
+  async expireWaiting(defaultMaxWaitTimeSec: number): Promise<number> {
+    const enCola = await this.llamadaRepo.find({
+      where: { estado: EstadoLlamada.EN_COLA },
     });
-    for (const call of expired) {
+    if (enCola.length === 0) return 0;
+
+    const colas = await this.colaRepo.find();
+    const limites = new Map(colas.map((c) => [c.id, c.tiempoMaximoEspera]));
+    const now = Date.now();
+
+    let abandoned = 0;
+    for (const llamada of enCola) {
+      const limite = limites.get(llamada.cola) ?? defaultMaxWaitTimeSec;
+      const incoming = llamada.marcasTiempo.incoming
+        ? Date.parse(llamada.marcasTiempo.incoming)
+        : null;
+      if (incoming == null || now - incoming < limite * 1000) continue;
       try {
-        await this.applyAbandoned(call, new Date());
+        await this.applyAbandoned(llamada, new Date());
+        abandoned++;
         this.logger.warn(
-          `Llamada ${call.id} ABANDONADA: superó maxWaitTimeSec (${maxWaitTimeSec}s)`,
+          `Llamada ${llamada.id} ABANDONADA: superó tiempoMaximoEspera de la cola ${llamada.cola} (${limite}s)`,
         );
       } catch (error) {
         this.logger.warn(
-          `No se pudo abandonar la llamada ${call.id}: ${
+          `No se pudo abandonar la llamada ${llamada.id}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
       }
     }
-    return expired.length;
+    return abandoned;
   }
 }

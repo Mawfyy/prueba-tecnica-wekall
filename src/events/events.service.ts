@@ -5,8 +5,8 @@ import { ProcessedEvent } from './processed-event.entity.js';
 import { CallsService } from '../calls/calls.service.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { AssignmentService } from '../assignment/assignment.service.js';
-import { AgentState } from '../domain/agent-state.js';
-import { CallState } from '../domain/call-state.js';
+import { EstadoAgente } from '../domain/estado-agente.js';
+import { EstadoLlamada } from '../domain/estado-llamada.js';
 import { InconsistencyError } from '../domain/errors.js';
 
 export const EVENT_TYPES = [
@@ -26,6 +26,8 @@ export interface EventPayload {
   callId?: string;
   agentId?: string;
   queue?: string;
+  /** Número del cliente que llama (solo call.received). */
+  numeroOrigen?: string;
   reason?: string;
 }
 
@@ -144,7 +146,7 @@ export class EventsService {
     if (!payload.queue) {
       throw new InconsistencyError('payload.queue es obligatorio');
     }
-    await this.callsService.enqueue(callId, payload.queue, at);
+    await this.callsService.enqueue(callId, payload.queue, payload.numeroOrigen, at);
     await this.assignment.assignPendingCalls();
   }
 
@@ -154,31 +156,31 @@ export class EventsService {
   ): Promise<void> {
     const callId = this.requireCallId(payload);
     const call = await this.callsService.findOneOrFail(callId);
-    const agentId = payload.agentId ?? call.agentId;
+    const agentId = payload.agentId ?? call.agenteId;
     if (!agentId) {
       throw new InconsistencyError(
         `call.answered de ${callId} sin agente asignado`,
       );
     }
     const agent = await this.agentsService.findOne(agentId);
-    if (call.state !== CallState.TIMBRANDO) {
+    if (call.estado !== EstadoLlamada.TIMBRANDO) {
       throw new InconsistencyError(
-        `Llamada ${callId} no está TIMBRANDO (estado ${call.state})`,
+        `Llamada ${callId} no está TIMBRANDO (estado ${call.estado})`,
       );
     }
-    if (agent.state !== AgentState.TIMBRANDO) {
+    if (agent.estado !== EstadoAgente.TIMBRANDO) {
       throw new InconsistencyError(
-        `Agente ${agentId} no está TIMBRANDO (estado ${agent.state})`,
+        `Agente ${agentId} no está TIMBRANDO (estado ${agent.estado})`,
       );
     }
     await this.callsService.applyAnswered(call, at);
-    await this.agentsService.changeState(agent, AgentState.EN_LLAMADA);
+    await this.agentsService.changeState(agent, EstadoAgente.EN_LLAMADA);
   }
 
   private async onCallNoAnswer(payload: EventPayload): Promise<void> {
     const callId = this.requireCallId(payload);
     const call = await this.callsService.findOneOrFail(callId);
-    const agentId = payload.agentId ?? call.agentId;
+    const agentId = payload.agentId ?? call.agenteId;
     if (!agentId) {
       throw new InconsistencyError(
         `call.noanswer de ${callId} sin agente asignado`,
@@ -186,11 +188,11 @@ export class EventsService {
     }
     const agent = await this.agentsService.findOne(agentId);
 
-    // La llamada vuelve al inicio de la cola (conserva su enqueuedAt original).
+    // La llamada vuelve al inicio de la cola (conserva su incoming original).
     await this.callsService.applyBackToQueue(call);
     // El agente en TIMBRANDO pasa a PAUSA con motivo "No contesta".
-    await this.agentsService.changeState(agent, AgentState.PAUSA, {
-      pauseReason: 'No contesta',
+    await this.agentsService.changeState(agent, EstadoAgente.PAUSA, {
+      motivoPausa: 'No contesta',
     });
     // Otros agentes DISPONIBLE pueden quedarse con la llamada ya mismo.
     await this.assignment.assignPendingCalls();
@@ -203,37 +205,37 @@ export class EventsService {
     const callId = this.requireCallId(payload);
     const call = await this.callsService.findOneOrFail(callId);
 
-    switch (call.state) {
-      case CallState.ATENDIDA: {
+    switch (call.estado) {
+      case EstadoLlamada.CONECTADA: {
         await this.callsService.applyFinished(call, at);
-        if (call.agentId) {
-          const agent = await this.agentsService.findOne(call.agentId);
+        if (call.agenteId) {
+          const agent = await this.agentsService.findOne(call.agenteId);
           // Posgestión obligatoria: WRAP_UP por 15s exactos.
           await this.agentsService.startWrapUp(agent);
         }
         return;
       }
-      case CallState.TIMBRANDO: {
+      case EstadoLlamada.TIMBRANDO: {
         // El cliente colgó mientras sonaba: abandono y el agente queda libre.
         this.logger.warn(
-          `Llamada ${callId} abandonada durante el timbrado; agente ${call.agentId} vuelve a DISPONIBLE`,
+          `Llamada ${callId} abandonada durante el timbrado; agente ${call.agenteId} vuelve a DISPONIBLE`,
         );
         await this.callsService.applyAbandoned(call, at);
-        if (call.agentId) {
-          const agent = await this.agentsService.findOne(call.agentId);
-          await this.agentsService.changeState(agent, AgentState.DISPONIBLE);
+        if (call.agenteId) {
+          const agent = await this.agentsService.findOne(call.agenteId);
+          await this.agentsService.changeState(agent, EstadoAgente.DISPONIBLE);
         }
         await this.assignment.assignPendingCalls();
         return;
       }
-      case CallState.EN_COLA: {
+      case EstadoLlamada.EN_COLA: {
         this.logger.warn(`Llamada ${callId} abandonada mientras estaba en cola`);
         await this.callsService.applyAbandoned(call, at);
         return;
       }
       default:
         throw new InconsistencyError(
-          `call.hangup de llamada ${callId} en estado ${call.state}`,
+          `call.hangup de llamada ${callId} en estado ${call.estado}`,
         );
     }
   }
@@ -241,19 +243,19 @@ export class EventsService {
   private async onAgentLogin(payload: EventPayload): Promise<void> {
     const agentId = this.requireAgentId(payload);
     const agent = await this.agentsService.findOne(agentId);
-    if (agent.state !== AgentState.OFFLINE) {
+    if (agent.estado !== EstadoAgente.OFFLINE) {
       throw new InconsistencyError(
-        `agent.login de ${agentId} en estado ${agent.state} (se esperaba OFFLINE)`,
+        `agent.login de ${agentId} en estado ${agent.estado} (se esperaba OFFLINE)`,
       );
     }
-    await this.agentsService.changeState(agent, AgentState.DISPONIBLE);
+    await this.agentsService.changeState(agent, EstadoAgente.DISPONIBLE);
     await this.assignment.assignPendingCalls();
   }
 
   private async onAgentLogout(payload: EventPayload): Promise<void> {
     const agentId = this.requireAgentId(payload);
     const agent = await this.agentsService.findOne(agentId);
-    await this.agentsService.changeState(agent, AgentState.OFFLINE);
+    await this.agentsService.changeState(agent, EstadoAgente.OFFLINE);
   }
 
   private async onAgentPause(payload: EventPayload): Promise<void> {

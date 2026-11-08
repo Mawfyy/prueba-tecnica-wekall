@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { Agent, AgentState } from '../types.js';
+import type { Agente, EstadoAgente } from '../types.js';
 
 /** Código de colores por estado (Requerimiento 6). */
-const STATE_STYLES: Record<AgentState, { label: string; className: string }> = {
+const STATE_STYLES: Record<EstadoAgente, { label: string; className: string }> = {
   OFFLINE: { label: 'Desconectado', className: 'state-offline' },
   DISPONIBLE: { label: 'Disponible', className: 'state-disponible' },
   PAUSA: { label: 'Pausa', className: 'state-pausa' },
@@ -21,33 +21,33 @@ function formatElapsed(fromIso: string, now: number): string {
     : `${mm}:${ss}`;
 }
 
-/** Cronómetro mm:ss basado en stateChangedAt, actualizado cada segundo. */
-function useElapsed(stateChangedAt: string): string {
+/** Cronómetro mm:ss basado en horaEntradaEstado, actualizado cada segundo. */
+function useElapsed(horaEntradaEstado: string): string {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  return formatElapsed(stateChangedAt, now);
+  return formatElapsed(horaEntradaEstado, now);
 }
 
 interface AgentCardProps {
-  agent: Agent;
-  onPause: (agentId: string) => void;
-  onUnpause: (agentId: string) => void;
+  agente: Agente;
+  onPause: (agenteId: string) => void;
+  onUnpause: (agenteId: string) => void;
 }
 
-export function AgentCard({ agent, onPause, onUnpause }: AgentCardProps) {
-  const elapsed = useElapsed(agent.stateChangedAt);
-  const style = STATE_STYLES[agent.state];
+export function AgentCard({ agente, onPause, onUnpause }: AgentCardProps) {
+  const elapsed = useElapsed(agente.horaEntradaEstado);
+  const style = STATE_STYLES[agente.estado];
 
   return (
     <article className={`agent-card ${style.className}`}>
       <header>
         <div>
-          <h3>{agent.name}</h3>
+          <h3>{agente.nombre}</h3>
           <span className="agent-meta">
-            {agent.id} · Ext. {agent.extension}
+            {agente.id} · Ext. {agente.extension}
           </span>
         </div>
         <span className="agent-state-badge">{style.label}</span>
@@ -58,30 +58,30 @@ export function AgentCard({ agent, onPause, onUnpause }: AgentCardProps) {
       </div>
 
       <div className="agent-queues">
-        {agent.queues.map((queue) => (
-          <span key={queue} className="queue-chip">
-            {queue}
+        {agente.colas.map((cola) => (
+          <span key={cola} className="queue-chip">
+            {cola}
           </span>
         ))}
       </div>
 
-      {agent.state === 'PAUSA' && agent.pauseReason && (
-        <p className="agent-pause-reason">Motivo: {agent.pauseReason}</p>
+      {agente.estado === 'PAUSA' && agente.motivoPausa && (
+        <p className="agent-pause-reason">Motivo: {agente.motivoPausa}</p>
       )}
 
       {/* Botones de supervisor (Punto Extra) */}
       <footer className="agent-actions">
         <button
           type="button"
-          disabled={agent.state !== 'DISPONIBLE'}
-          onClick={() => onPause(agent.id)}
+          disabled={agente.estado !== 'DISPONIBLE'}
+          onClick={() => onPause(agente.id)}
         >
           Pausar
         </button>
         <button
           type="button"
-          disabled={agent.state !== 'PAUSA'}
-          onClick={() => onUnpause(agent.id)}
+          disabled={agente.estado !== 'PAUSA'}
+          onClick={() => onUnpause(agente.id)}
         >
           Despausar
         </button>

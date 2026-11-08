@@ -2,27 +2,28 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Mutex } from 'async-mutex';
-import { Agent } from '../agents/agent.entity.js';
-import { Call } from '../calls/call.entity.js';
-import { AgentState } from '../domain/agent-state.js';
-import { CallState } from '../domain/call-state.js';
+import { Agente } from '../agents/agente.entity.js';
+import { Llamada } from '../calls/llamada.entity.js';
+import { incomingMs } from '../calls/calls.service.js';
+import { EstadoAgente } from '../domain/estado-agente.js';
+import { EstadoLlamada } from '../domain/estado-llamada.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
 
 /**
  * Tiempo libre del agente en DISPONIBLE. "Idle max" = el que lleva más
- * tiempo libre = el `idleSince` más antiguo (menor timestamp).
+ * tiempo libre = el `libreDesde` más antiguo (menor timestamp).
  */
-function idleSinceMs(agent: Agent): number {
-  return (agent.idleSince ?? agent.stateChangedAt ?? new Date()).getTime();
+function libreDesdeMs(agente: Agente): number {
+  return (agente.libreDesde ?? agente.horaEntradaEstado ?? new Date()).getTime();
 }
 
 /**
  * Motor de asignación concurrente (Requerimiento 3).
  *
  * Algoritmo: FIFO + Idle-Max
- *   1. Toma la llamada EN_COLA más antigua (menor `enqueuedAt`).
+ *   1. Toma la llamada EN_COLA más antigua (menor `marcasTiempo.incoming`).
  *   2. Entre los agentes DISPONIBLE que atienden su cola, elige el que
- *      lleva más tiempo libre (menor `idleSince`).
+ *      lleva más tiempo libre (menor `libreDesde`).
  *   3. Repite hasta que no queden llamadas o no haya agentes compatibles.
  *
  * Concurrencia: `async-mutex` serializa TODO el ciclo leer-decidir-escribir.
@@ -37,10 +38,10 @@ export class AssignmentService {
   private readonly mutex = new Mutex();
 
   constructor(
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
-    @InjectRepository(Call)
-    private readonly callRepo: Repository<Call>,
+    @InjectRepository(Agente)
+    private readonly agenteRepo: Repository<Agente>,
+    @InjectRepository(Llamada)
+    private readonly llamadaRepo: Repository<Llamada>,
     private readonly dashboard: DashboardService,
   ) {}
 
@@ -49,41 +50,47 @@ export class AssignmentService {
     return this.mutex
       .runExclusive(async () => {
         for (;;) {
-          // 1. FIFO: la llamada en cola más antigua.
-          const call = await this.callRepo.findOne({
-            where: { state: CallState.EN_COLA },
-            order: { enqueuedAt: 'ASC' },
+          // 1. FIFO: la llamada en cola más antigua. El orden se resuelve en
+          //    memoria porque `marcasTiempo.incoming` vive en un jsonb.
+          const enCola = await this.llamadaRepo.find({
+            where: { estado: EstadoLlamada.EN_COLA },
           });
-          if (!call) return;
+          if (enCola.length === 0) return;
+          const llamada = enCola.reduce((masVieja, actual) =>
+            incomingMs(actual) < incomingMs(masVieja) ? actual : masVieja,
+          );
 
           // 2. Candidatos: DISPONIBLE y que atiendan la cola de la llamada.
-          const available = await this.agentRepo.find({
-            where: { state: AgentState.DISPONIBLE },
+          const disponibles = await this.agenteRepo.find({
+            where: { estado: EstadoAgente.DISPONIBLE },
           });
-          const candidates = available.filter((a) =>
-            a.queues?.includes(call.queue),
+          const candidatos = disponibles.filter((a) =>
+            a.colas?.includes(llamada.cola),
           );
-          if (candidates.length === 0) return;
+          if (candidatos.length === 0) return;
 
           // 3. Idle-Max: el de mayor tiempo libre.
-          const agent = candidates.reduce((best, current) =>
-            idleSinceMs(current) < idleSinceMs(best) ? current : best,
+          const agente = candidatos.reduce((mejor, actual) =>
+            libreDesdeMs(actual) < libreDesdeMs(mejor) ? actual : mejor,
           );
 
           // 4. Asignación atómica (protegida por el mutex).
           const now = new Date();
-          agent.state = AgentState.TIMBRANDO;
-          agent.stateChangedAt = now;
-          agent.idleSince = null;
-          call.state = CallState.TIMBRANDO;
-          call.assignedAt = now;
-          call.agentId = agent.id;
+          agente.estado = EstadoAgente.TIMBRANDO;
+          agente.horaEntradaEstado = now;
+          agente.libreDesde = null;
+          llamada.estado = EstadoLlamada.TIMBRANDO;
+          llamada.marcasTiempo = {
+            ...llamada.marcasTiempo,
+            ringing: now.toISOString(),
+          };
+          llamada.agenteId = agente.id;
 
-          await this.agentRepo.save(agent);
-          await this.callRepo.save(call);
+          await this.agenteRepo.save(agente);
+          await this.llamadaRepo.save(llamada);
 
           this.logger.log(
-            `Llamada ${call.id} (${call.queue}) asignada a ${agent.id} [FIFO + idle-max]`,
+            `Llamada ${llamada.id} (${llamada.cola}) asignada a ${agente.id} [FIFO + idle-max]`,
           );
         }
       })

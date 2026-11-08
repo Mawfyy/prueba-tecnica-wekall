@@ -1,12 +1,12 @@
-import type { Call, QueueMetrics } from '../types.js';
+import type { Llamada, MetricasCola } from '../types.js';
 
 interface QueuePanelProps {
-  queues: QueueMetrics[];
-  calls: Call[];
+  colas: MetricasCola[];
+  llamadas: Llamada[];
 }
 
 /** Panel de colas con métricas avanzadas: ASA y SLA (Punto Extra). */
-export function QueuePanel({ queues, calls }: QueuePanelProps) {
+export function QueuePanel({ colas, llamadas }: QueuePanelProps) {
   return (
     <section className="panel">
       <h2>Colas</h2>
@@ -24,19 +24,19 @@ export function QueuePanel({ queues, calls }: QueuePanelProps) {
           </tr>
         </thead>
         <tbody>
-          {queues.map((queue) => (
-            <tr key={queue.queue}>
-              <td>{queue.queue}</td>
-              <td>{queue.waiting}</td>
-              <td>{queue.ringing}</td>
-              <td>{queue.answered}</td>
-              <td>{queue.abandoned}</td>
-              <td>{queue.maxWaitTimeSec}s</td>
-              <td>{queue.asaSec == null ? '—' : `${queue.asaSec}s`}</td>
-              <td>{queue.slaPct == null ? '—' : `${queue.slaPct}%`}</td>
+          {colas.map((metrica) => (
+            <tr key={metrica.cola}>
+              <td>{metrica.nombre ?? metrica.cola}</td>
+              <td>{metrica.enEspera}</td>
+              <td>{metrica.timbrando}</td>
+              <td>{metrica.atendidas}</td>
+              <td>{metrica.abandonadas}</td>
+              <td>{metrica.esperaMaximaSeg}s</td>
+              <td>{metrica.asaSeg == null ? '—' : `${metrica.asaSeg}s`}</td>
+              <td>{metrica.slaPct == null ? '—' : `${metrica.slaPct}%`}</td>
             </tr>
           ))}
-          {queues.length === 0 && (
+          {colas.length === 0 && (
             <tr>
               <td colSpan={8}>Sin datos todavía…</td>
             </tr>
@@ -46,13 +46,14 @@ export function QueuePanel({ queues, calls }: QueuePanelProps) {
 
       <h3>Llamadas activas</h3>
       <ul className="active-calls">
-        {calls.map((call) => (
-          <li key={call.id}>
-            <strong>{call.id}</strong> · cola {call.queue} · {call.state}
-            {call.agentId ? ` · agente ${call.agentId}` : ''}
+        {llamadas.map((llamada) => (
+          <li key={llamada.id}>
+            <strong>{llamada.id}</strong> · {llamada.numeroOrigen} · cola{' '}
+            {llamada.cola} · {llamada.estado}
+            {llamada.agenteId ? ` · agente ${llamada.agenteId}` : ''}
           </li>
         ))}
-        {calls.length === 0 && <li>No hay llamadas activas.</li>}
+        {llamadas.length === 0 && <li>No hay llamadas activas.</li>}
       </ul>
     </section>
   );

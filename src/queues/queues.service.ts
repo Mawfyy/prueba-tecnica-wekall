@@ -3,27 +3,29 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { In } from 'typeorm';
-import { Agent } from '../agents/agent.entity.js';
-import { Call } from '../calls/call.entity.js';
-import { CallState } from '../domain/call-state.js';
+import { Agente } from '../agents/agente.entity.js';
+import { Llamada } from '../calls/llamada.entity.js';
+import { Cola } from './cola.entity.js';
+import { EstadoLlamada } from '../domain/estado-llamada.js';
 
 /** Umbral del Nivel de Servicio: llamada atendida en <= 20s (Punto Extra). */
 export const DEFAULT_SLA_THRESHOLD_SEC = 20;
 
-export interface QueueMetrics {
-  queue: string;
+export interface MetricasCola {
+  cola: string;
+  nombre: string | null;
   /** Llamadas EN_COLA ahora mismo. */
-  waiting: number;
+  enEspera: number;
   /** Llamadas TIMBRANDO ahora mismo. */
-  ringing: number;
-  /** Atendidas (ATENDIDA + FINALIZADA) históricas. */
-  answered: number;
+  timbrando: number;
+  /** Atendidas (CONECTADA + FINALIZADA) históricas. */
+  atendidas: number;
   /** Abandonadas históricas. */
-  abandoned: number;
+  abandonadas: number;
   /** Espera actual más larga entre las llamadas EN_COLA. */
-  maxWaitTimeSec: number;
+  esperaMaximaSeg: number;
   /** Average Speed of Answer: promedio de espera de las atendidas. */
-  asaSec: number | null;
+  asaSeg: number | null;
   /** % de atendidas dentro del umbral de SLA (20s por defecto). */
   slaPct: number | null;
 }
@@ -33,10 +35,12 @@ export class QueuesService {
   private readonly logger = new Logger(QueuesService.name);
 
   constructor(
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
-    @InjectRepository(Call)
-    private readonly callRepo: Repository<Call>,
+    @InjectRepository(Agente)
+    private readonly agenteRepo: Repository<Agente>,
+    @InjectRepository(Llamada)
+    private readonly llamadaRepo: Repository<Llamada>,
+    @InjectRepository(Cola)
+    private readonly colaRepo: Repository<Cola>,
     private readonly config: ConfigService,
   ) {}
 
@@ -44,75 +48,96 @@ export class QueuesService {
     return this.config.get<number>('SLA_THRESHOLD_SEC', DEFAULT_SLA_THRESHOLD_SEC);
   }
 
-  async getQueueMetrics(): Promise<QueueMetrics[]> {
-    const [agents, calls] = await Promise.all([
-      this.agentRepo.find(),
-      this.callRepo.find(),
+  async getQueueMetrics(): Promise<MetricasCola[]> {
+    const [agentes, llamadas, colas] = await Promise.all([
+      this.agenteRepo.find(),
+      this.llamadaRepo.find(),
+      this.colaRepo.find(),
     ]);
 
-    const queueNames = new Set<string>([
-      ...agents.flatMap((a) => a.queues ?? []),
-      ...calls.map((c) => c.queue),
+    const nombres = new Map(colas.map((c) => [c.id, c.nombre]));
+    const idsColas = new Set<string>([
+      ...colas.map((c) => c.id),
+      ...agentes.flatMap((a) => a.colas ?? []),
+      ...llamadas.map((c) => c.cola),
     ]);
 
     const now = Date.now();
-    const metrics: QueueMetrics[] = [];
+    const metricas: MetricasCola[] = [];
 
-    for (const queue of [...queueNames].sort()) {
-      const ofQueue = calls.filter((c) => c.queue === queue);
-      const waiting = ofQueue.filter((c) => c.state === CallState.EN_COLA);
-      const answered = ofQueue.filter(
-        (c) => c.state === CallState.ATENDIDA || c.state === CallState.FINALIZADA,
+    for (const id of [...idsColas].sort()) {
+      const deLaCola = llamadas.filter((c) => c.cola === id);
+      const enEspera = deLaCola.filter(
+        (c) => c.estado === EstadoLlamada.EN_COLA,
       );
-      const abandoned = ofQueue.filter((c) => c.state === CallState.ABANDONADA);
-      const ringing = ofQueue.filter((c) => c.state === CallState.TIMBRANDO);
+      const atendidas = deLaCola.filter(
+        (c) =>
+          c.estado === EstadoLlamada.CONECTADA ||
+          c.estado === EstadoLlamada.FINALIZADA,
+      );
+      const abandonadas = deLaCola.filter(
+        (c) => c.estado === EstadoLlamada.ABANDONADA,
+      );
+      const timbrando = deLaCola.filter(
+        (c) => c.estado === EstadoLlamada.TIMBRANDO,
+      );
 
-      const waits = answered
-        .map((c) => c.waitTimeSec)
+      const esperas = atendidas
+        .map((c) => c.tiempoEsperaSeg)
         .filter((w): w is number => w != null);
 
-      const asaSec =
-        waits.length > 0
-          ? Math.round(waits.reduce((sum, w) => sum + w, 0) / waits.length)
+      const asaSeg =
+        esperas.length > 0
+          ? Math.round(esperas.reduce((sum, w) => sum + w, 0) / esperas.length)
           : null;
 
       const slaPct =
-        waits.length > 0
+        esperas.length > 0
           ? Math.round(
-              (waits.filter((w) => w <= this.slaThresholdSec).length /
-                waits.length) *
+              (esperas.filter((w) => w <= this.slaThresholdSec).length /
+                esperas.length) *
                 100,
             )
           : null;
 
-      const maxWaitTimeSec =
-        waiting.length > 0
+      const esperaMaximaSeg =
+        enEspera.length > 0
           ? Math.round(
-              Math.max(...waiting.map((c) => now - c.enqueuedAt.getTime())) / 1000,
+              Math.max(
+                ...enEspera.map((c) =>
+                  c.marcasTiempo.incoming
+                    ? now - Date.parse(c.marcasTiempo.incoming)
+                    : 0,
+                ),
+              ) / 1000,
             )
           : 0;
 
-      metrics.push({
-        queue,
-        waiting: waiting.length,
-        ringing: ringing.length,
-        answered: answered.length,
-        abandoned: abandoned.length,
-        maxWaitTimeSec,
-        asaSec,
+      metricas.push({
+        cola: id,
+        nombre: nombres.get(id) ?? null,
+        enEspera: enEspera.length,
+        timbrando: timbrando.length,
+        atendidas: atendidas.length,
+        abandonadas: abandonadas.length,
+        esperaMaximaSeg,
+        asaSeg,
         slaPct,
       });
     }
 
-    return metrics;
+    return metricas;
   }
 
-  /** Snapshot liviano de llamadas activas para el tablero. */
-  async getActiveCalls(): Promise<Call[]> {
-    return this.callRepo.find({
-      where: { state: In([CallState.EN_COLA, CallState.TIMBRANDO]) },
-      order: { enqueuedAt: 'ASC' },
+  /** Snapshot liviano de llamadas activas para el tablero (orden FIFO). */
+  async getActiveCalls(): Promise<Llamada[]> {
+    const activas = await this.llamadaRepo.find({
+      where: { estado: In([EstadoLlamada.EN_COLA, EstadoLlamada.TIMBRANDO]) },
     });
+    return activas.sort(
+      (a, b) =>
+        Date.parse(a.marcasTiempo.incoming ?? '') -
+        Date.parse(b.marcasTiempo.incoming ?? ''),
+    );
   }
 }
-

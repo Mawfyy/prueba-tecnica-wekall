@@ -23,8 +23,27 @@ docker compose up
 
 La primera vez compila las imágenes (`docker compose up --build` si hace
 falta). El backend aplica `synchronize: true` de TypeORM, así que las tablas
-se crean solas y el seed inserta 4 agentes (`AG-1001`…`AG-1004`, todos
-`OFFLINE`).
+se crean solas y el seed inserta 3 colas (`ventas`, `soporte`, `facturacion`)
+y 4 agentes (`AG-1001`…`AG-1004`, todos `OFFLINE`).
+
+> **Si cambiaste el modelo de datos** (o vienes de una versión anterior del
+> esquema), resetea la base: `docker compose down -v` borra el volumen de
+> PostgreSQL y el siguiente `up` recrea tablas y seed desde cero.
+
+### Modelo de datos (entidades del PDF)
+
+| Entidad | Campos |
+| --- | --- |
+| `Agente` | `id`, `nombre`, `extension`, `colas: string[]`, `estado` (`OFFLINE \| DISPONIBLE \| TIMBRANDO \| EN_LLAMADA \| WRAP_UP \| PAUSA`), `horaEntradaEstado` |
+| `Cola` | `id`, `nombre`, `tiempoMaximoEspera` (segundos) |
+| `Llamada` | `id`, `numeroOrigen`, `cola`, `estado` (`EN_COLA \| TIMBRANDO \| CONECTADA \| FINALIZADA \| ABANDONADA`), `marcasTiempo: { incoming?, ringing?, connected?, ended?, abandoned? }` |
+
+Extensiones internas necesarias para el ACD (no están en el PDF, se documentan
+como decisión de diseño): `Agente.libreDesde/motivoPausa/posgestionHasta`
+(motor idle-max, motivo de pausa y vencimiento de la posgestión) y
+`Llamada.agenteId/tiempoEsperaSeg/tiempoConversacionSeg` (asignación y
+métricas ASA/SLA). `marcasTiempo` se persiste como `jsonb`; a escala real
+convendría un índice sobre `marcasTiempo->>'incoming'` para el FIFO.
 
 ### Desarrollo local
 
@@ -89,7 +108,7 @@ PBX/CRM ──POST /events──▶ EventsService ──▶ CallsService / Agent
 | `src/queues` | Métricas por cola: ASA, SLA (20s), espera máxima |
 | `src/dashboard` | Gateway Socket.io: snapshot al conectar + broadcast en cada cambio |
 | `src/cron` | Sweeper de WRAP_UP (1s) y abandono por espera máxima (5s) |
-| `src/seed` | Agentes iniciales |
+| `src/seed` | Colas y agentes iniciales |
 | `frontend/` | Tablero React: AgentCard, QueuePanel, WebPhone |
 
 ### API
@@ -97,7 +116,7 @@ PBX/CRM ──POST /events──▶ EventsService ──▶ CallsService / Agent
 | Método | Ruta | Descripción |
 | --- | --- | --- |
 | `POST` | `/events` | Ingesta de eventos del PBX (ver catálogo abajo) |
-| `GET` | `/agents` | Lista de agentes con estado y `stateChangedAt` |
+| `GET` | `/agents` | Lista de agentes con estado y `horaEntradaEstado` |
 | `POST` | `/agents/pause` | `{ agentId, reason? }` — pausa manual del supervisor |
 | `POST` | `/agents/unpause` | `{ agentId }` — despausa manual del supervisor |
 | `GET` | `/calls` | Lista de llamadas |
@@ -117,8 +136,8 @@ PBX/CRM ──POST /events──▶ EventsService ──▶ CallsService / Agent
 
 | `type` | Payload | Efecto |
 | --- | --- | --- |
-| `call.received` | `callId, queue` | Crea la llamada `EN_COLA` y dispara asignación |
-| `call.answered` | `callId, agentId?` | Llamada `ATENDIDA`, agente `EN_LLAMADA` |
+| `call.received` | `callId, queue, numeroOrigen?` | Crea la llamada `EN_COLA` y dispara asignación |
+| `call.answered` | `callId, agentId?` | Llamada `CONECTADA`, agente `EN_LLAMADA` |
 | `call.noanswer` | `callId, agentId?` | Agente `TIMBRANDO -> PAUSA` ("No contesta"); la llamada vuelve **al inicio** de la cola |
 | `call.hangup` | `callId` | Llamada `FINALIZADA` y agente `WRAP_UP` (15s); si estaba en cola/timbrando se marca `ABANDONADA` |
 | `agent.login` / `agent.logout` | `agentId` | `OFFLINE <-> DISPONIBLE` |
@@ -131,7 +150,7 @@ siempre con HTTP 200, para que un evento inconsistente no sea un error HTTP.
 
 ## 3. Máquina de estados del agente
 
-10 transiciones válidas y ninguna más (`src/domain/agent-state.ts`):
+10 transiciones válidas y ninguna más (`src/domain/estado-agente.ts`):
 
 ```
 OFFLINE     <-> DISPONIBLE
@@ -147,17 +166,18 @@ WRAP_UP     ->  DISPONIBLE
 - Toda mutación pasa por `AgentsService.changeState`, que llama a
   `assertTransition`: es imposible persistir un estado fuera de la máquina.
 - **Posgestión obligatoria:** en `call.hangup` el agente pasa a `WRAP_UP` con
-  `wrapUpUntil = ahora + 15s`. Un sweeper cada 1s lo promueve a `DISPONIBLE`
-  y re-dispara la asignación. Si el proceso se reinicia a mitad de la
-  posgestión, el sweeper completa el ciclo al arrancar.
+  `posgestionHasta = ahora + 15s`. Un sweeper cada 1s lo promueve a
+  `DISPONIBLE` y re-dispara la asignación. Si el proceso se reinicia a mitad
+  de la posgestión, el sweeper completa el ciclo al arrancar.
 
 ## 4. Motor de asignación y por qué el mutex
 
 Algoritmo (`src/assignment/assignment.service.ts`):
 
-1. **FIFO:** toma la llamada `EN_COLA` con el `enqueuedAt` más antiguo.
+1. **FIFO:** toma la llamada `EN_COLA` con el `marcasTiempo.incoming` más
+   antiguo.
 2. **Idle-Max:** entre los agentes `DISPONIBLE` que atienden esa cola,
-   elige el de `idleSince` más antiguo (el que lleva más tiempo libre).
+   elige el de `libreDesde` más antiguo (el que lleva más tiempo libre).
 3. Repite hasta agotar llamadas o agentes compatibles.
 
 **El problema de concurrencia:** el ciclo *leer → decidir → escribir* no es
@@ -187,10 +207,15 @@ supuesto, no se implementa.
 
 ## 6. Métricas de colas
 
-`GET /queues` devuelve por cola: `waiting`, `ringing`, `answered`,
-`abandoned`, `maxWaitTimeSec` (espera actual más larga), **ASA** (promedio de
-`waitTimeSec` de las atendidas) y **SLA%** (atendidas con espera ≤ 20s,
+`GET /queues` devuelve por cola: `enEspera`, `timbrando`, `atendidas`,
+`abandonadas`, `esperaMaximaSeg` (espera actual más larga), **ASA** (promedio
+de `tiempoEsperaSeg` de las atendidas) y **SLA%** (atendidas con espera ≤ 20s,
 configurable con `SLA_THRESHOLD_SEC`).
+
+El tiempo máximo de espera es **por cola**: el worker de abandono usa el
+`tiempoMaximoEspera` de la entidad `Cola` de cada llamada (seed: ventas 60s,
+soporte 90s, facturación 120s); si la cola no está registrada, usa el default
+`MAX_WAIT_TIME_SEC` (60s).
 
 ## 7. Frontend
 
@@ -200,7 +225,7 @@ configurable con `SLA_THRESHOLD_SEC`).
   rojo y, al reconectar, reemplaza el estado con el snapshot fresco **sin
   recargar la página** (resincronización silenciosa).
 - **AgentCard:** color por estado, nombre, extensión, colas y cronómetro
-  `mm:ss` calculado desde `stateChangedAt`. Botones de supervisor
+  `mm:ss` calculado desde `horaEntradaEstado`. Botones de supervisor
   **Pausar / Despausar** (`POST /agents/pause`, `POST /agents/unpause`).
 - **QueuePanel:** llamadas en espera, atendidas, abandonadas, espera máxima,
   ASA y SLA.
@@ -216,7 +241,8 @@ configurable con `SLA_THRESHOLD_SEC`).
 2. La asignación es automática al recibir `call.received` (ACD clásico); no
    hay paso manual de "aceptar" del agente.
 3. `call.noanswer` regresa la llamada al inicio de la cola conservando su
-   `enqueuedAt` original (al ser la más vieja, el FIFO la deja primera).
+   `marcasTiempo.incoming` original (al ser la más vieja, el FIFO la deja
+   primera).
 4. Un `call.hangup` sobre una llamada `TIMBRANDO` se interpreta como
    abandono del cliente; el agente vuelve a `DISPONIBLE`.
 5. Mutex por proceso: válido para una instancia de backend. Multi-instancia
@@ -242,10 +268,10 @@ con las políticas de uso de IA del proceso de selección.
 ├── Dockerfile                # backend
 ├── src/
 │   ├── domain/               # máquina de estados + errores (+ spec)
-│   ├── agents/  calls/       # entidades, servicios, controladores (+ specs)
+│   ├── agents/  calls/       # entidades (Agente, Llamada), servicios, controladores (+ specs)
+│   ├── queues/               # entidad Cola + métricas ASA / SLA
 │   ├── assignment/           # motor FIFO + idle-max con async-mutex (+ spec)
 │   ├── events/               # POST /events: idempotencia + resiliencia
-│   ├── queues/               # métricas ASA / SLA
 │   ├── dashboard/            # gateway Socket.io
 │   ├── cron/                 # wrap-up sweeper + abandono por espera
 │   └── seed/

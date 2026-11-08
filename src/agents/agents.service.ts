@@ -2,20 +2,20 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { LessThanOrEqual, Repository } from 'typeorm';
-import { Agent } from './agent.entity.js';
+import { Agente } from './agente.entity.js';
 import {
-  AgentState,
+  EstadoAgente,
   assertTransition,
   InvalidTransitionError,
-} from '../domain/agent-state.js';
+} from '../domain/estado-agente.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
 
 /** Posgestión obligatoria: 15 segundos exactos de WRAP_UP. */
 export const DEFAULT_WRAP_UP_SECONDS = 15;
 
 export interface ChangeStateOptions {
-  pauseReason?: string | null;
-  wrapUpUntil?: Date | null;
+  motivoPausa?: string | null;
+  posgestionHasta?: Date | null;
 }
 
 /**
@@ -28,8 +28,8 @@ export class AgentsService {
   private readonly logger = new Logger(AgentsService.name);
 
   constructor(
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(Agente)
+    private readonly agenteRepo: Repository<Agente>,
     private readonly dashboard: DashboardService,
     private readonly config: ConfigService,
   ) {}
@@ -38,53 +38,53 @@ export class AgentsService {
     return this.config.get<number>('WRAP_UP_SECONDS', DEFAULT_WRAP_UP_SECONDS);
   }
 
-  findAll(): Promise<Agent[]> {
-    return this.agentRepo.find({ order: { id: 'ASC' } });
+  findAll(): Promise<Agente[]> {
+    return this.agenteRepo.find({ order: { id: 'ASC' } });
   }
 
-  async findOne(id: string): Promise<Agent> {
-    const agent = await this.agentRepo.findOneBy({ id });
-    if (!agent) {
+  async findOne(id: string): Promise<Agente> {
+    const agente = await this.agenteRepo.findOneBy({ id });
+    if (!agente) {
       throw new NotFoundException(`Agente ${id} no existe`);
     }
-    return agent;
+    return agente;
   }
 
   /**
    * Aplica la máquina de estados y recalcula los campos derivados:
-   * - `stateChangedAt`: referencia del cronómetro del dashboard.
-   * - `idleSince`: se marca al entrar en DISPONIBLE (motor idle-max).
-   * - `wrapUpUntil`: vencimiento de la posgestión.
+   * - `horaEntradaEstado`: referencia del cronómetro del dashboard.
+   * - `libreDesde`: se marca al entrar en DISPONIBLE (motor idle-max).
+   * - `posgestionHasta`: vencimiento de la posgestión.
    */
   async changeState(
-    agent: Agent,
-    to: AgentState,
+    agente: Agente,
+    hacia: EstadoAgente,
     options: ChangeStateOptions = {},
-  ): Promise<Agent> {
-    assertTransition(agent.state, to);
-    const from = agent.state;
+  ): Promise<Agente> {
+    assertTransition(agente.estado, hacia);
+    const desde = agente.estado;
     const now = new Date();
-    agent.state = to;
-    agent.stateChangedAt = now;
-    agent.idleSince = to === AgentState.DISPONIBLE ? now : null;
-    agent.pauseReason =
-      to === AgentState.PAUSA
-        ? (options.pauseReason ?? 'Sin motivo especificado')
+    agente.estado = hacia;
+    agente.horaEntradaEstado = now;
+    agente.libreDesde = hacia === EstadoAgente.DISPONIBLE ? now : null;
+    agente.motivoPausa =
+      hacia === EstadoAgente.PAUSA
+        ? (options.motivoPausa ?? 'Sin motivo especificado')
         : null;
-    agent.wrapUpUntil = options.wrapUpUntil ?? null;
-    await this.agentRepo.save(agent);
-    this.logger.log(`Agente ${agent.id}: ${from} -> ${to}`);
+    agente.posgestionHasta = options.posgestionHasta ?? null;
+    await this.agenteRepo.save(agente);
+    this.logger.log(`Agente ${agente.id}: ${desde} -> ${hacia}`);
     await this.dashboard.broadcast();
-    return agent;
+    return agente;
   }
 
   /**
    * EN_LLAMADA -> WRAP_UP con vencimiento a 15s.
    * El sweeper del cron lo promoverá a DISPONIBLE automáticamente.
    */
-  async startWrapUp(agent: Agent): Promise<Agent> {
-    const wrapUpUntil = new Date(Date.now() + this.wrapUpSeconds * 1000);
-    return this.changeState(agent, AgentState.WRAP_UP, { wrapUpUntil });
+  async startWrapUp(agente: Agente): Promise<Agente> {
+    const posgestionHasta = new Date(Date.now() + this.wrapUpSeconds * 1000);
+    return this.changeState(agente, EstadoAgente.WRAP_UP, { posgestionHasta });
   }
 
   /**
@@ -94,43 +94,43 @@ export class AgentsService {
    * termina el ciclo.
    */
   async sweepWrapUps(): Promise<number> {
-    const due = await this.agentRepo.find({
+    const vencidos = await this.agenteRepo.find({
       where: {
-        state: AgentState.WRAP_UP,
-        wrapUpUntil: LessThanOrEqual(new Date()),
+        estado: EstadoAgente.WRAP_UP,
+        posgestionHasta: LessThanOrEqual(new Date()),
       },
     });
-    for (const agent of due) {
-      await this.changeState(agent, AgentState.DISPONIBLE);
+    for (const agente of vencidos) {
+      await this.changeState(agente, EstadoAgente.DISPONIBLE);
     }
-    return due.length;
+    return vencidos.length;
   }
 
-  async pause(agentId: string, reason?: string): Promise<Agent> {
-    const agent = await this.findOne(agentId);
-    return this.changeState(agent, AgentState.PAUSA, {
-      pauseReason: reason ?? 'Pausa manual del supervisor',
+  async pause(agenteId: string, motivo?: string): Promise<Agente> {
+    const agente = await this.findOne(agenteId);
+    return this.changeState(agente, EstadoAgente.PAUSA, {
+      motivoPausa: motivo ?? 'Pausa manual del supervisor',
     });
   }
 
-  async unpause(agentId: string): Promise<Agent> {
-    const agent = await this.findOne(agentId);
-    return this.changeState(agent, AgentState.DISPONIBLE);
+  async unpause(agenteId: string): Promise<Agente> {
+    const agente = await this.findOne(agenteId);
+    return this.changeState(agente, EstadoAgente.DISPONIBLE);
   }
 
-  async login(agentId: string): Promise<Agent> {
-    const agent = await this.findOne(agentId);
-    return this.changeState(agent, AgentState.DISPONIBLE);
+  async login(agenteId: string): Promise<Agente> {
+    const agente = await this.findOne(agenteId);
+    return this.changeState(agente, EstadoAgente.DISPONIBLE);
   }
 
-  async logout(agentId: string): Promise<Agent> {
-    const agent = await this.findOne(agentId);
-    return this.changeState(agent, AgentState.OFFLINE);
+  async logout(agenteId: string): Promise<Agente> {
+    const agente = await this.findOne(agenteId);
+    return this.changeState(agente, EstadoAgente.OFFLINE);
   }
 
   /** Usado por los tests para validar que el servicio respeta la máquina. */
-  validateTransition(from: AgentState, to: AgentState): void {
-    assertTransition(from, to);
+  validateTransition(desde: EstadoAgente, hacia: EstadoAgente): void {
+    assertTransition(desde, hacia);
   }
 
   isInvalidTransitionError(error: unknown): error is InvalidTransitionError {

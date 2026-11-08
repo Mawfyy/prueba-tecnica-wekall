@@ -1,164 +1,159 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssignmentService } from './assignment.service.js';
-import { Agent } from '../agents/agent.entity.js';
-import { Call } from '../calls/call.entity.js';
-import { AgentState } from '../domain/agent-state.js';
-import { CallState } from '../domain/call-state.js';
+import { Agente } from '../agents/agente.entity.js';
+import { Llamada } from '../calls/llamada.entity.js';
+import { EstadoAgente } from '../domain/estado-agente.js';
+import { EstadoLlamada } from '../domain/estado-llamada.js';
 
 /**
  * Repositorios en memoria. Los `save` tienen un pequeño delay para que
  * cualquier carrera real entre invocaciones concurrentes se manifieste.
  */
-class FakeAgentRepo {
-  saved: Agent[] = [];
-  constructor(public agents: Agent[]) {}
-  async find({ where }: { where: { state: AgentState } }) {
-    return this.agents.filter((a) => a.state === where.state);
+class FakeAgenteRepo {
+  saved: Agente[] = [];
+  constructor(public agentes: Agente[]) {}
+  async find({ where }: { where: { estado: EstadoAgente } }) {
+    return this.agentes.filter((a) => a.estado === where.estado);
   }
-  async save(agent: Agent) {
+  async save(agente: Agente) {
     await new Promise((resolve) => setTimeout(resolve, 5));
-    this.saved.push(agent);
-    return agent;
+    this.saved.push(agente);
+    return agente;
   }
 }
 
-class FakeCallRepo {
-  saved: Call[] = [];
-  constructor(public calls: Call[]) {}
-  async findOne({
-    where,
-  }: {
-    where: { state: CallState };
-    order?: { enqueuedAt: 'ASC' | 'DESC' };
-  }) {
-    const candidates = this.calls
-      .filter((c) => c.state === where.state)
-      .sort((a, b) => a.enqueuedAt.getTime() - b.enqueuedAt.getTime());
-    return candidates[0] ?? null;
+class FakeLlamadaRepo {
+  saved: Llamada[] = [];
+  constructor(public llamadas: Llamada[]) {}
+  async find({ where }: { where: { estado: EstadoLlamada } }) {
+    return this.llamadas.filter((c) => c.estado === where.estado);
   }
-  async save(call: Call) {
+  async save(llamada: Llamada) {
     await new Promise((resolve) => setTimeout(resolve, 5));
-    this.saved.push(call);
-    return call;
+    this.saved.push(llamada);
+    return llamada;
   }
 }
 
-function makeAgent(id: string, queues: string[], idleSince: Date): Agent {
+function makeAgente(id: string, colas: string[], libreDesde: Date): Agente {
   return {
     id,
-    name: id,
+    nombre: id,
     extension: id,
-    queues,
-    state: AgentState.DISPONIBLE,
-    stateChangedAt: idleSince,
-    idleSince,
-    pauseReason: null,
-    wrapUpUntil: null,
-  } as Agent;
+    colas,
+    estado: EstadoAgente.DISPONIBLE,
+    horaEntradaEstado: libreDesde,
+    libreDesde,
+    motivoPausa: null,
+    posgestionHasta: null,
+  } as Agente;
 }
 
-function makeCall(id: string, queue: string, enqueuedAt: Date): Call {
+function makeLlamada(id: string, cola: string, incoming: Date): Llamada {
   return {
     id,
-    queue,
-    state: CallState.EN_COLA,
-    enqueuedAt,
-    assignedAt: null,
-    answeredAt: null,
-    endedAt: null,
-    agentId: null,
-    waitTimeSec: null,
-    talkTimeSec: null,
-  } as Call;
+    numeroOrigen: '+5199999999',
+    cola,
+    estado: EstadoLlamada.EN_COLA,
+    marcasTiempo: { incoming: incoming.toISOString() },
+    agenteId: null,
+    tiempoEsperaSeg: null,
+    tiempoConversacionSeg: null,
+  } as Llamada;
 }
 
 describe('AssignmentService (Requerimiento 3: FIFO + idle-max + mutex)', () => {
-  let agentRepo: FakeAgentRepo;
-  let callRepo: FakeCallRepo;
+  let agenteRepo: FakeAgenteRepo;
+  let llamadaRepo: FakeLlamadaRepo;
   let dashboard: { broadcast: ReturnType<typeof vi.fn> };
   let service: AssignmentService;
 
   beforeEach(() => {
-    agentRepo = new FakeAgentRepo([]);
-    callRepo = new FakeCallRepo([]);
+    agenteRepo = new FakeAgenteRepo([]);
+    llamadaRepo = new FakeLlamadaRepo([]);
     dashboard = { broadcast: vi.fn(async () => {}) };
     service = new AssignmentService(
-      agentRepo as never,
-      callRepo as never,
+      agenteRepo as never,
+      llamadaRepo as never,
       dashboard as never,
     );
   });
 
   it('asigna primero la llamada más antigua (FIFO)', async () => {
     const now = Date.now();
-    const older = makeCall('call-001', 'ventas', new Date(now - 60_000));
-    const newer = makeCall('call-002', 'ventas', new Date(now - 10_000));
-    callRepo.calls = [newer, older];
-    agentRepo.agents = [makeAgent('AG-1001', ['ventas'], new Date(now))];
+    const older = makeLlamada('call-001', 'ventas', new Date(now - 60_000));
+    const newer = makeLlamada('call-002', 'ventas', new Date(now - 10_000));
+    llamadaRepo.llamadas = [newer, older];
+    agenteRepo.agentes = [makeAgente('AG-1001', ['ventas'], new Date(now))];
 
     await service.assignPendingCalls();
 
-    expect(older.agentId).toBe('AG-1001');
-    expect(older.state).toBe(CallState.TIMBRANDO);
+    expect(older.agenteId).toBe('AG-1001');
+    expect(older.estado).toBe(EstadoLlamada.TIMBRANDO);
+    expect(older.marcasTiempo.ringing).toBeDefined();
     // El agente quedó ocupado: la segunda llamada sigue en cola.
-    expect(newer.state).toBe(CallState.EN_COLA);
-    expect(newer.agentId).toBeNull();
+    expect(newer.estado).toBe(EstadoLlamada.EN_COLA);
+    expect(newer.agenteId).toBeNull();
   });
 
   it('elige el agente con más tiempo libre (idle-max)', async () => {
     const now = Date.now();
-    const busyRecently = makeAgent(
+    const busyRecently = makeAgente(
       'AG-1001',
       ['ventas'],
       new Date(now - 5_000),
     );
-    const idleLongest = makeAgent('AG-1002', ['ventas'], new Date(now - 60_000));
-    callRepo.calls = [makeCall('call-001', 'ventas', new Date(now))];
-    agentRepo.agents = [busyRecently, idleLongest];
+    const idleLongest = makeAgente('AG-1002', ['ventas'], new Date(now - 60_000));
+    llamadaRepo.llamadas = [makeLlamada('call-001', 'ventas', new Date(now))];
+    agenteRepo.agentes = [busyRecently, idleLongest];
 
     await service.assignPendingCalls();
 
-    expect(idleLongest.state).toBe(AgentState.TIMBRANDO);
-    expect(busyRecently.state).toBe(AgentState.DISPONIBLE);
-    expect(callRepo.calls[0].agentId).toBe('AG-1002');
+    expect(idleLongest.estado).toBe(EstadoAgente.TIMBRANDO);
+    expect(busyRecently.estado).toBe(EstadoAgente.DISPONIBLE);
+    expect(llamadaRepo.llamadas[0].agenteId).toBe('AG-1002');
   });
 
   it('solo asigna agentes que atienden la cola de la llamada', async () => {
     const now = Date.now();
-    callRepo.calls = [makeCall('call-001', 'facturacion', new Date(now))];
-    agentRepo.agents = [
-      makeAgent('AG-1001', ['ventas'], new Date(now - 60_000)),
-      makeAgent('AG-1002', ['soporte'], new Date(now - 30_000)),
+    llamadaRepo.llamadas = [
+      makeLlamada('call-001', 'facturacion', new Date(now)),
+    ];
+    agenteRepo.agentes = [
+      makeAgente('AG-1001', ['ventas'], new Date(now - 60_000)),
+      makeAgente('AG-1002', ['soporte'], new Date(now - 30_000)),
     ];
 
     await service.assignPendingCalls();
 
-    expect(callRepo.calls[0].state).toBe(CallState.EN_COLA);
-    expect(agentRepo.saved).toHaveLength(0);
+    expect(llamadaRepo.llamadas[0].estado).toBe(EstadoLlamada.EN_COLA);
+    expect(agenteRepo.saved).toHaveLength(0);
   });
 
   it('deja la llamada en cola si no hay agentes DISPONIBLE', async () => {
     const now = Date.now();
-    callRepo.calls = [makeCall('call-001', 'ventas', new Date(now))];
-    agentRepo.agents = [
-      makeAgent('AG-1001', ['ventas'], new Date(now)),
+    llamadaRepo.llamadas = [
+      makeLlamada('call-001', 'ventas', new Date(now)),
     ];
-    agentRepo.agents[0].state = AgentState.PAUSA;
+    agenteRepo.agentes = [
+      makeAgente('AG-1001', ['ventas'], new Date(now)),
+    ];
+    agenteRepo.agentes[0].estado = EstadoAgente.PAUSA;
 
     await service.assignPendingCalls();
 
-    expect(callRepo.calls[0].state).toBe(CallState.EN_COLA);
+    expect(llamadaRepo.llamadas[0].estado).toBe(EstadoLlamada.EN_COLA);
   });
 
   it('bajo concurrencia, el mutex evita asignar una llamada a dos agentes', async () => {
     const now = Date.now();
-    callRepo.calls = [
-      makeCall('call-001', 'ventas', new Date(now - 30_000)),
-      makeCall('call-002', 'ventas', new Date(now - 20_000)),
+    llamadaRepo.llamadas = [
+      makeLlamada('call-001', 'ventas', new Date(now - 30_000)),
+      makeLlamada('call-002', 'ventas', new Date(now - 20_000)),
     ];
-    agentRepo.agents = [
-      makeAgent('AG-1001', ['ventas'], new Date(now - 60_000)),
-      makeAgent('AG-1002', ['ventas'], new Date(now - 10_000)),
+    agenteRepo.agentes = [
+      makeAgente('AG-1001', ['ventas'], new Date(now - 60_000)),
+      makeAgente('AG-1002', ['ventas'], new Date(now - 10_000)),
     ];
 
     // Dos flujos simultáneos (ej. dos call.received casi al mismo tiempo).
@@ -167,16 +162,16 @@ describe('AssignmentService (Requerimiento 3: FIFO + idle-max + mutex)', () => {
       service.assignPendingCalls(),
     ]);
 
-    const assigned = callRepo.calls.filter((c) => c.agentId !== null);
+    const assigned = llamadaRepo.llamadas.filter((c) => c.agenteId !== null);
     expect(assigned).toHaveLength(2);
 
     // Cada llamada fue asignada exactamente una vez y a un agente distinto.
-    const agentIds = assigned.map((c) => c.agentId).sort();
+    const agentIds = assigned.map((c) => c.agenteId).sort();
     expect(agentIds).toEqual(['AG-1001', 'AG-1002']);
     expect(new Set(agentIds).size).toBe(2);
 
     // Ninguna llamada fue "asignada" dos veces (sin duplicados en saved).
-    const savedCallIds = callRepo.saved.map((c) => c.id).sort();
+    const savedCallIds = llamadaRepo.saved.map((c) => c.id).sort();
     expect(savedCallIds).toEqual(['call-001', 'call-002']);
   });
 });

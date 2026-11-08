@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Agent } from '../agents/agent.entity.js';
+import { Agente } from '../agents/agente.entity.js';
 import { AgentsModule } from '../agents/agents.module.js';
 import { CallsModule } from '../calls/calls.module.js';
 import { AssignmentModule } from '../assignment/assignment.module.js';
@@ -9,7 +9,7 @@ import { MaintenanceService } from './maintenance.service.js';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Agent]),
+    TypeOrmModule.forFeature([Agente]),
     AgentsModule,
     CallsModule,
     AssignmentModule,

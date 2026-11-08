@@ -1,41 +1,58 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Agent } from '../agents/agent.entity.js';
-import { AgentState } from '../domain/agent-state.js';
+import { Agente } from '../agents/agente.entity.js';
+import { Cola } from '../queues/cola.entity.js';
+import { EstadoAgente } from '../domain/estado-agente.js';
 
-const SEED_AGENTS = [
-  { id: 'AG-1001', name: 'Ana Torres', extension: '1001', queues: ['ventas'] },
+const SEED_AGENTES = [
+  { id: 'AG-1001', nombre: 'Ana Torres', extension: '1001', colas: ['ventas'] },
   {
     id: 'AG-1002',
-    name: 'Bruno Díaz',
+    nombre: 'Bruno Díaz',
     extension: '1002',
-    queues: ['ventas', 'soporte'],
+    colas: ['ventas', 'soporte'],
   },
-  { id: 'AG-1003', name: 'Carla Ruiz', extension: '1003', queues: ['soporte'] },
+  { id: 'AG-1003', nombre: 'Carla Ruiz', extension: '1003', colas: ['soporte'] },
   {
     id: 'AG-1004',
-    name: 'Diego Pérez',
+    nombre: 'Diego Pérez',
     extension: '1004',
-    queues: ['soporte', 'facturacion'],
+    colas: ['soporte', 'facturacion'],
   },
 ];
 
-/** Carga inicial de agentes (todos OFFLINE) si la tabla está vacía. */
+const SEED_COLAS = [
+  { id: 'ventas', nombre: 'Ventas', tiempoMaximoEspera: 60 },
+  { id: 'soporte', nombre: 'Soporte', tiempoMaximoEspera: 90 },
+  { id: 'facturacion', nombre: 'Facturación', tiempoMaximoEspera: 120 },
+];
+
+/** Carga inicial de colas y agentes (todos OFFLINE) si las tablas están vacías. */
 @Injectable()
 export class SeedService implements OnModuleInit {
   private readonly logger = new Logger(SeedService.name);
 
   constructor(
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
+    @InjectRepository(Agente)
+    private readonly agenteRepo: Repository<Agente>,
+    @InjectRepository(Cola)
+    private readonly colaRepo: Repository<Cola>,
   ) {}
 
   async onModuleInit(): Promise<void> {
-    if ((await this.agentRepo.count()) > 0) return;
-    await this.agentRepo.save(
-      SEED_AGENTS.map((agent) => ({ ...agent, state: AgentState.OFFLINE })),
-    );
-    this.logger.log(`Seed: ${SEED_AGENTS.length} agentes creados`);
+    if ((await this.colaRepo.count()) === 0) {
+      await this.colaRepo.save(SEED_COLAS);
+      this.logger.log(`Seed: ${SEED_COLAS.length} colas creadas`);
+    }
+    if ((await this.agenteRepo.count()) === 0) {
+      await this.agenteRepo.save(
+        SEED_AGENTES.map((agente) => ({
+          ...agente,
+          estado: EstadoAgente.OFFLINE,
+        })),
+      );
+      this.logger.log(`Seed: ${SEED_AGENTES.length} agentes creados`);
+    }
   }
 }

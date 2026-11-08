@@ -41,16 +41,16 @@ export default function App() {
       {snapshot ? (
         <>
           <section className="agent-grid">
-            {snapshot.agents.map((agent) => (
+            {snapshot.agentes.map((agente) => (
               <AgentCard
-                key={agent.id}
-                agent={agent}
+                key={agente.id}
+                agente={agente}
                 onPause={handlePause}
                 onUnpause={handleUnpause}
               />
             ))}
           </section>
-          <QueuePanel queues={snapshot.queues} calls={snapshot.calls} />
+          <QueuePanel colas={snapshot.colas} llamadas={snapshot.llamadas} />
         </>
       ) : (
         <p className="loading">Esperando el primer snapshot del servidor…</p>

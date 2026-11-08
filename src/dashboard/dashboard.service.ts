@@ -2,15 +2,18 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { Server } from 'socket.io';
-import { Agent } from '../agents/agent.entity.js';
-import { Call } from '../calls/call.entity.js';
-import { QueuesService, type QueueMetrics } from '../queues/queues.service.js';
+import { Agente } from '../agents/agente.entity.js';
+import { Llamada } from '../calls/llamada.entity.js';
+import {
+  QueuesService,
+  type MetricasCola,
+} from '../queues/queues.service.js';
 
 export interface DashboardSnapshot {
   serverTime: string;
-  agents: Agent[];
-  queues: QueueMetrics[];
-  calls: Call[];
+  agentes: Agente[];
+  colas: MetricasCola[];
+  llamadas: Llamada[];
 }
 
 /**
@@ -26,10 +29,10 @@ export class DashboardService {
   private server: Server | null = null;
 
   constructor(
-    @InjectRepository(Agent)
-    private readonly agentRepo: Repository<Agent>,
-    @InjectRepository(Call)
-    private readonly callRepo: Repository<Call>,
+    @InjectRepository(Agente)
+    private readonly agenteRepo: Repository<Agente>,
+    @InjectRepository(Llamada)
+    private readonly llamadaRepo: Repository<Llamada>,
     private readonly queuesService: QueuesService,
   ) {}
 
@@ -38,16 +41,16 @@ export class DashboardService {
   }
 
   async snapshot(): Promise<DashboardSnapshot> {
-    const [agents, queues, calls] = await Promise.all([
-      this.agentRepo.find({ order: { id: 'ASC' } }),
+    const [agentes, colas, llamadas] = await Promise.all([
+      this.agenteRepo.find({ order: { id: 'ASC' } }),
       this.queuesService.getQueueMetrics(),
       this.queuesService.getActiveCalls(),
     ]);
     return {
       serverTime: new Date().toISOString(),
-      agents,
-      queues,
-      calls,
+      agentes,
+      colas,
+      llamadas,
     };
   }
 
