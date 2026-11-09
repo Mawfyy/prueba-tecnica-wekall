@@ -9,7 +9,6 @@ import { DashboardService } from '../dashboard/dashboard.service.js';
 import { AgentsService } from '../agents/agents.service.js';
 import { Agente } from '../agents/agente.entity.js';
 import { EstadoAgente } from '../domain/estado-agente.js';
-import { AssignmentService } from '../assignment/assignment.service.js';
 
 /** Timestamp de entrada a la cola en ms (0 si no existe, no debería). */
 export function incomingMs(llamada: Llamada): number {
@@ -33,8 +32,8 @@ export class CallsService {
     private readonly colaRepo: Repository<Cola>,
     private readonly dashboard: DashboardService,
     private readonly agentsService: AgentsService,
+    @InjectRepository(Agente)
     private readonly agentRepo: Repository<Agente>,
-    private readonly assignmentService: AssignmentService
   ) {}
 
   /** Más recientes primero (por su entrada a la cola). */
@@ -185,7 +184,6 @@ export class CallsService {
       }
     }
 
-    await this.assignmentService.assignPendingCalls();
     return contadorLlamadas;
   }
 
