@@ -61,4 +61,19 @@ export class MaintenanceService {
       this.logger.error('Fallo el worker de tiempo máximo de espera', error);
     }
   }
+
+  @Interval(5000)
+  async checkRinging(): Promise<void> {
+    try {
+      const defaultMaxRigningTimeSec = this.config.get<number>(
+        'MAX_RINGING_WAIT_SEC',
+        30,
+      );
+      const contador = await this.callsService.expireRinging(defaultMaxRigningTimeSec);
+      this.logger.log(`Numero de llamadas devueltas a cola ${contador}`);
+    } catch (error) {
+      this.logger.error('Fallo el worker de revisado de llamadas timbrando', error);
+    }
+  }
+
 }

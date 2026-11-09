@@ -6,6 +6,10 @@ import { Llamada } from './llamada.entity.js';
 import { EstadoLlamada } from '../domain/estado-llamada.js';
 import { InconsistencyError } from '../domain/errors.js';
 import { DashboardService } from '../dashboard/dashboard.service.js';
+import { AgentsService } from '../agents/agents.service.js';
+import { Agente } from '../agents/agente.entity.js';
+import { EstadoAgente } from '../domain/estado-agente.js';
+import { AssignmentService } from '../assignment/assignment.service.js';
 
 /** Timestamp de entrada a la cola en ms (0 si no existe, no debería). */
 export function incomingMs(llamada: Llamada): number {
@@ -28,6 +32,9 @@ export class CallsService {
     @InjectRepository(Cola)
     private readonly colaRepo: Repository<Cola>,
     private readonly dashboard: DashboardService,
+    private readonly agentsService: AgentsService,
+    private readonly agentRepo: Repository<Agente>,
+    private readonly assignmentService: AssignmentService
   ) {}
 
   /** Más recientes primero (por su entrada a la cola). */
@@ -153,6 +160,33 @@ export class CallsService {
     };
     llamada.agenteId = null;
     return this.persist(llamada);
+  }
+
+  async expireRinging(ringTimeoutSec: number): Promise<number> {
+    const llamadas = await this.llamadaRepo.find({
+      where: {estado: EstadoLlamada.TIMBRANDO}
+    });
+    let contadorLlamadas = 0;
+    for (const llamada of llamadas) {
+      try {
+        if (llamada.agenteId != null && llamada.marcasTiempo.ringing != null) {
+          const agente = await this.agentRepo.findOne({
+            where: { id: llamada.agenteId }
+          })
+          const totalTiempollamadaTimbrando = Date.now() - Date.parse(llamada.marcasTiempo.ringing);
+          if (agente != null && totalTiempollamadaTimbrando >= ringTimeoutSec * 1000) {
+            await this.agentsService.changeState(agente, EstadoAgente.DISPONIBLE);
+            await this.applyBackToQueue(llamada);
+            contadorLlamadas++
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Hubo un error al tratar de encolar la llamada despues de un tiempo determinado ${llamada.id}`);
+      }
+    }
+
+    await this.assignmentService.assignPendingCalls();
+    return contadorLlamadas;
   }
 
   /**
