@@ -217,12 +217,15 @@ export class EventsService {
       }
       case EstadoLlamada.TIMBRANDO: {
         // El cliente colgó mientras sonaba: abandono y el agente queda libre.
+        // Se captura el agente ANTES de applyAbandoned: ese método pone
+        // `agenteId` en null y el check posterior siempre fallaría.
+        const agentIdTimbrando = call.agenteId;
         this.logger.warn(
-          `Llamada ${callId} abandonada durante el timbrado; agente ${call.agenteId} vuelve a DISPONIBLE`,
+          `Llamada ${callId} abandonada durante el timbrado; agente ${agentIdTimbrando ?? 'sin asignar'} vuelve a DISPONIBLE`,
         );
         await this.callsService.applyAbandoned(call, at);
-        if (call.agenteId) {
-          const agent = await this.agentsService.findOne(call.agenteId);
+        if (agentIdTimbrando) {
+          const agent = await this.agentsService.findOne(agentIdTimbrando);
           await this.agentsService.changeState(agent, EstadoAgente.DISPONIBLE);
         }
         await this.assignment.assignPendingCalls();

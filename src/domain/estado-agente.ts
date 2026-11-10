@@ -1,7 +1,7 @@
 /**
  * Máquina de estados estricta del agente (Parte B - Requerimiento 2).
  *
- * Las 10 únicas transiciones válidas:
+ * Las 10 transiciones del enunciado:
  *
  *   1.  OFFLINE     -> DISPONIBLE
  *   2.  DISPONIBLE  -> OFFLINE
@@ -35,12 +35,17 @@ export const TRANSICIONES_VALIDAS: Readonly<
     EstadoAgente.TIMBRANDO,
   ],
   [EstadoAgente.PAUSA]: [EstadoAgente.OFFLINE, EstadoAgente.DISPONIBLE],
-  [EstadoAgente.TIMBRANDO]: [EstadoAgente.DISPONIBLE, EstadoAgente.EN_LLAMADA],
+  [EstadoAgente.TIMBRANDO]: [
+    EstadoAgente.DISPONIBLE,
+    EstadoAgente.EN_LLAMADA,
+    // Requerida por el punto extra call.noanswer (ver doc del módulo).
+    EstadoAgente.PAUSA,
+  ],
   [EstadoAgente.EN_LLAMADA]: [EstadoAgente.WRAP_UP],
   [EstadoAgente.WRAP_UP]: [EstadoAgente.DISPONIBLE],
 };
 
-/** Total de aristas de la máquina (10). Se usa en los tests como invariant. */
+/** Total de aristas de la máquina (11). Se usa en los tests como invariant. */
 export const TOTAL_TRANSICIONES_VALIDAS = Object.values(
   TRANSICIONES_VALIDAS,
 ).reduce((total, destinos) => total + destinos.length, 0);

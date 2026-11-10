@@ -56,7 +56,7 @@ export default function App() {
         <p className="loading">Esperando el primer snapshot del servidor…</p>
       )}
 
-      <WebPhone />
+      {/* <WebPhone /> */}
     </main>
   );
 }

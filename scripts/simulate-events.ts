@@ -163,7 +163,13 @@ async function main(): Promise<void> {
     callerId: '+5110000005',
   });
   await sleep(DELAY_MS);
-  const agent5 = await agentOfCall(cid(5));
+  // La asignación puede tardar unos segundos (motor + broadcast): reintentamos
+  // antes de declarar que quedó EN_COLA, para no dejar llamadas huérfanas.
+  let agent5 = await agentOfCall(cid(5));
+  for (let i = 0; i < 5 && !agent5; i++) {
+    await sleep(1000);
+    agent5 = await agentOfCall(cid(5));
+  }
   if (agent5) {
     // Fue asignada: contestar y colgar para dejar el tablero en estado limpio.
     await send(eid(19), 'call.answered', { callId: cid(5), agentId: agent5 });
@@ -175,6 +181,37 @@ async function main(): Promise<void> {
       `— ${cid(5)} queda EN_COLA: si supera MAX_WAIT_TIME_SEC el cron la marca ABANDONADA —`,
     );
   }
+
+  // --- 13. Ring timeout: nadie contesta y el cron devuelve la llamada ------
+  console.log(
+    `— Ring timeout: ${cid(6)} timbra sin respuesta; tras MAX_RINGING_WAIT_SEC el cron la devuelve a EN_COLA y se reasigna —`,
+  );
+  await send(eid(21), 'call.incoming', {
+    callId: cid(6),
+    queue: 'soporte',
+    callerId: '+5110000006',
+  });
+  // El cron revisa cada 5s con umbral de 30s (MAX_RINGING_WAIT_SEC): esperamos
+  // lo suficiente para verlo actuar en vivo.
+  await sleep(36_000);
+  const agent6 = await agentOfCall(cid(6));
+  if (agent6) {
+    // Fue reasignada (posiblemente a otro agente): cerramos la llamada.
+    await send(eid(22), 'call.answered', { callId: cid(6), agentId: agent6 });
+    await sleep(DELAY_MS);
+    await send(eid(23), 'call.hangup', { callId: cid(6) });
+    await sleep(DELAY_MS);
+  } else {
+    console.log(`— ${cid(6)} sigue EN_COLA: no había agentes disponibles —`);
+  }
+
+  // --- 14. Supervisor pausa/despausa y el agente termina su turno ----------
+  await send(eid(24), 'agent.pause', { agentId: 'AG-1004', reason: 'Break' });
+  await sleep(DELAY_MS);
+  await send(eid(25), 'agent.unpause', { agentId: 'AG-1004' });
+  await sleep(DELAY_MS);
+  await send(eid(26), 'agent.logout', { agentId: 'AG-1004' });
+  await sleep(DELAY_MS);
 
   console.log('\nSimulación terminada. Revisa el tablero y GET /queues.');
 }

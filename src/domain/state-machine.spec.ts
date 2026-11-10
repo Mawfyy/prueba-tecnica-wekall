@@ -11,8 +11,15 @@ import {
 const ALL_STATES = Object.values(EstadoAgente);
 
 describe('Máquina de estados del agente (Requerimiento 2)', () => {
-  it('define exactamente 10 transiciones válidas', () => {
-    expect(TOTAL_TRANSICIONES_VALIDAS).toBe(10);
+  it('define exactamente 11 transiciones válidas (10 del enunciado + TIMBRANDO->PAUSA del extra noanswer)', () => {
+    expect(TOTAL_TRANSICIONES_VALIDAS).toBe(11);
+  });
+
+  it('TIMBRANDO -> PAUSA es válida: la exige el punto extra call.noanswer', () => {
+    expect(puedeTransicionar(EstadoAgente.TIMBRANDO, EstadoAgente.PAUSA)).toBe(
+      true,
+    );
+    expect(() => assertTransition(EstadoAgente.TIMBRANDO, EstadoAgente.PAUSA)).not.toThrow();
   });
 
   it('acepta las 10 transiciones válidas del enunciado', () => {
